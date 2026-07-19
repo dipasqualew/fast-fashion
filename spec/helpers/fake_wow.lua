@@ -273,6 +273,77 @@ function fake.newPreviewApi(config)
     return api, recorded
 end
 
+---A stand-in `GalleryFrame`, counting the only three things anything ever asks of one.
+---@return GalleryFrame gallery
+---@return table recorded `{ shows, hides, toggles }`
+function fake.newGallery()
+    local recorded = { shows = 0, hides = 0, toggles = 0 }
+
+    local gallery = {
+        show = function()
+            recorded.shows = recorded.shows + 1
+        end,
+
+        hide = function()
+            recorded.hides = recorded.hides + 1
+        end,
+
+        toggle = function()
+            recorded.toggles = recorded.toggles + 1
+        end,
+
+        refresh = function()
+            recorded.refreshes = (recorded.refreshes or 0) + 1
+        end,
+    }
+
+    return gallery, recorded
+end
+
+---A stand-in for `WardrobeTabDeps.newEmbeddedGallery`.
+---
+---Recording the *hosts* is the point: the embedded gallery is only correct if it was built
+---against the frame Collections handed over, and a factory that was never called at all is
+---how a test proves no gallery was built in a failure path.
+---@return fun(host: any): GalleryFrame factory
+---@return table recorded `{ hosts, galleries, calls }`
+function fake.newEmbeddedGalleryFactory()
+    local recorded = { hosts = {}, galleries = {} }
+
+    local function factory(host)
+        local gallery, galleryRecorded = fake.newGallery()
+        recorded.hosts[#recorded.hosts + 1] = host
+        recorded.galleries[#recorded.galleries + 1] = galleryRecorded
+        return gallery
+    end
+
+    ---@return number
+    function recorded.calls()
+        return #recorded.hosts
+    end
+
+    ---The recording for the gallery built by the most recent call, so a test does not have
+    ---to index by hand in the common single-gallery case.
+    ---@return table? recorded
+    function recorded.last()
+        return recorded.galleries[#recorded.galleries]
+    end
+
+    return factory, recorded
+end
+
+---A dependency that must never be touched, for proving a module does *not* reach for
+---something it was once wired to. Any read of any field raises.
+---@param label string what the poisoned table stands in for, so a failure names itself
+---@return table poisoned
+function fake.newForbidden(label)
+    return setmetatable({}, {
+        __index = function(_, key)
+            error(label .. " must not be touched, but '" .. tostring(key) .. "' was read", 2)
+        end,
+    })
+end
+
 ---A stand-in for `CollectionsAPI`, the load-on-demand Blizzard_Collections seam.
 ---
 ---Shape:
@@ -280,9 +351,16 @@ end
 ---  `loadable`  `boolean?` — false models the client refusing to load it at all.
 ---  `wardrobe`  `false?` — drops the wardrobe frame, the "loaded but unrecognisable UI" case.
 ---  `tab`       `false?` — makes `addTab` fail, the other unrecognisable-UI case.
+---  `galleryHost` `false?` — drops `getGalleryHost` entirely, which is optional on the
+---    interface; the tab then has to fall back to the wardrobe frame itself.
+---
+---`recorded.wardrobe` and `recorded.host` are handed back so a test can assert *which*
+---frame something was given. They are deliberately two different widgets even though the
+---game returns the same frame for both: an assertion that cannot tell them apart proves
+---nothing about which one the code asked for.
 ---@param config table?
 ---@return CollectionsAPI api
----@return table recorded `{ loads, opened, tabs, tabClicks, callbacks, deliver }`
+---@return table recorded `{ loads, opened, tabs, tabClicks, callbacks, wardrobe, host, deliver }`
 function fake.newCollectionsApi(config)
     config = config or {}
     local recorded = { loads = 0, opened = 0, tabs = {}, tabClicks = 0, callbacks = {} }
@@ -292,6 +370,9 @@ function fake.newCollectionsApi(config)
     if config.wardrobe ~= false then
         wardrobe = newWidget("Frame", "WardrobeCollectionFrame")
     end
+    local galleryHost = wardrobe and newWidget("Frame", "WardrobeCollectionFrameGalleryHost") or nil
+    recorded.wardrobe = wardrobe
+    recorded.host = galleryHost
 
     local api = {
         isLoaded = function()
@@ -312,11 +393,6 @@ function fake.newCollectionsApi(config)
         end,
 
         getWardrobe = function()
-            return wardrobe
-        end,
-
-        ---What the gallery frame parents itself to when it is embedded.
-        getGalleryHost = function()
             return wardrobe
         end,
 
@@ -343,6 +419,14 @@ function fake.newCollectionsApi(config)
             recorded.opened = recorded.opened + 1
         end,
     }
+
+    ---What the gallery frame parents itself to when it is embedded. Optional on the
+    ---interface, so a client that does not expose one has to be expressible too.
+    if config.galleryHost ~= false then
+        api.getGalleryHost = function()
+            return galleryHost
+        end
+    end
 
     ---The client finishing a load-on-demand: flips the flag and fires every registered
     ---callback, the way ADDON_LOADED does.

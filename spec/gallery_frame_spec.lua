@@ -5,6 +5,7 @@ describe("ns.newGalleryFrame", function()
     local ns = loader.load()
 
     local FRAME_NAME = "FastFashionGalleryFrame"
+    local EMBEDDED_NAME = "FastFashionGalleryEmbedded"
 
     ---@class FrameRowSpec
     ---@field id string
@@ -176,8 +177,10 @@ describe("ns.newGalleryFrame", function()
 
     ---@param recorded table
     ---@return table widget the top-level gallery window
+    ---The gallery's own window, under whichever name this mode built it: the two modes take
+    ---different global names so that Escape cannot resolve to the wrong one.
     local function windowOf(recorded)
-        return recorded.byName[FRAME_NAME]
+        return recorded.byName[FRAME_NAME] or recorded.byName[EMBEDDED_NAME]
     end
 
     ---The arguments a named frame was created with. A widget answers any unset field with
@@ -854,7 +857,7 @@ describe("ns.newGalleryFrame", function()
 
             frame.show()
 
-            assert.is_nil(creationOf(recorded, FRAME_NAME).template)
+            assert.is_nil(creationOf(recorded, EMBEDDED_NAME).template)
         end)
 
         -- The Collections frame already carries a title; a second one would sit on top.
@@ -904,6 +907,27 @@ describe("ns.newGalleryFrame", function()
 
             assert.equal("BasicFrameTemplateWithInset", creationOf(recorded, FRAME_NAME).template)
             assert.same({ "FastFashionGalleryFrame" }, recorded.escapeClosed)
+        end)
+
+        -- Both galleries exist at once once the tab attaches, and the client keys frames by
+        -- a single global name. Sharing one would leave that name pointing at whichever was
+        -- built last, so Escape — which looks the standalone frame up by name through
+        -- UISpecialFrames — would hide the embedded gallery and strand the open window.
+        it("names the embedded gallery differently from the standalone one", function()
+            local host = fake.newWidget("Frame", "WardrobeCollectionFrame")
+            local embedded, embeddedRecorded = newFrame({ rows = { { id = "a" } } }, {
+                getParent = function()
+                    return host
+                end,
+            })
+            local standalone, standaloneRecorded = newFrame({ rows = { { id = "a" } } })
+
+            embedded.show()
+            standalone.show()
+
+            assert.is_nil(embeddedRecorded.byName[FRAME_NAME])
+            assert.is_truthy(standaloneRecorded.byName[FRAME_NAME])
+            assert.is_truthy(embeddedRecorded.byName[EMBEDDED_NAME])
         end)
     end)
 

@@ -10,6 +10,7 @@ local _, ns = ...
 ---@field gallery GalleryFrame
 ---@field controller GalleryController? Drops cached collection state on `/ff refresh`.
 ---@field wardrobeTab WardrobeTab? Opens the gallery in its Collections tab when available.
+---@field diagnose fun(): string[]? Lines describing what this client actually exposes.
 ---@field logger Logger
 ---@field db table SavedVariables root, for the persisted debug flag.
 
@@ -28,14 +29,16 @@ function ns.newSlashCommands(deps)
     local gallery = deps.gallery
     local controller = deps.controller
     local wardrobeTab = deps.wardrobeTab
+    local diagnose = deps.diagnose
     local logger = deps.logger
     local db = deps.db
 
     ---The gallery's home is the Wardrobe tab where one could be attached, and the
-    ---standalone window everywhere else.
+    ---standalone window everywhere else. The fallback is unconditional on the tab saying
+    ---no: `/ff` showing nothing at all is the worst outcome available here, and it is
+    ---exactly what happens if this trusts the tab to have handled it.
     local function openGallery()
-        if wardrobeTab then
-            wardrobeTab.select()
+        if wardrobeTab and wardrobeTab.select() then
             return
         end
         gallery.toggle()
@@ -71,6 +74,20 @@ function ns.newSlashCommands(deps)
         db.debug = not db.debug
         logger.setDebug(db.debug)
         logger.info("debug logging " .. (db.debug and "on" or "off"))
+    end)
+
+    ---The parts of this addon that guess at Blizzard's internals cannot be verified by the
+    ---test suite — there is no client to ask. So the addon reports what it found instead:
+    ---faster than reading the source to work out which guess was wrong, and it stays true
+    ---as the client changes underneath it.
+    command("diag", "report what this client exposes", function()
+        if not diagnose then
+            logger.info("no diagnostics available")
+            return
+        end
+        for _, line in ipairs(diagnose()) do
+            logger.info(line)
+        end
     end)
 
     command("help", "show this list", function()

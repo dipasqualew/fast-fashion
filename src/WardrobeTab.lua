@@ -11,7 +11,7 @@ local _, ns = ...
 ---@class WardrobeTab
 ---@field attach fun(): boolean Attaches now if possible; returns whether the tab exists.
 ---@field isAttached fun(): boolean
----@field select fun() Bring the gallery tab to the front, loading Collections if needed.
+---@field select fun(): boolean Brings the tab to the front; false when there is no tab to show.
 
 ---The slice of Blizzard's collections UI this needs. Every global lives behind here.
 ---@class CollectionsAPI
@@ -24,7 +24,7 @@ local _, ns = ...
 
 ---@class WardrobeTabDeps
 ---@field collections CollectionsAPI
----@field gallery GalleryFrame
+---@field newEmbeddedGallery fun(host: any): GalleryFrame Built only once a host frame exists.
 ---@field logger Logger?
 
 local TAB_LABEL = "Fast Fashion"
@@ -35,10 +35,12 @@ local function noop() end
 ---@return WardrobeTab
 function ns.newWardrobeTab(deps)
     local collections = deps.collections
-    local gallery = deps.gallery
+    local newEmbeddedGallery = deps.newEmbeddedGallery
     local logger = deps.logger or { info = noop, debug = noop }
 
     local tab
+    ---@type GalleryFrame?
+    local embedded
     local attached = false
     ---Set once so a failed attach is not retried on every click; the reason it failed
     ---(a UI that does not expose what we need) will not change within a session.
@@ -63,14 +65,18 @@ function ns.newWardrobeTab(deps)
             return false
         end
 
+        local host = collections.getGalleryHost and collections.getGalleryHost() or wardrobe
+        embedded = newEmbeddedGallery(host)
+
         tab = collections.addTab(wardrobe, TAB_LABEL, function()
-            gallery.show()
+            embedded.show()
         end, function()
-            gallery.hide()
+            embedded.hide()
         end)
 
         if not tab then
             logger.debug("could not add a wardrobe tab; staying standalone")
+            embedded = nil
             gaveUp = true
             return false
         end
@@ -93,26 +99,25 @@ function ns.newWardrobeTab(deps)
             return attached
         end,
 
-        ---What `/ff` runs. Loading Collections is deferred all the way to here so a player
-        ---who never asks for the gallery never pays for the addon being loaded.
+        ---Shows the gallery in its tab. Returns false when it could not — the caller owns
+        ---the fallback, because the standalone window is not this module's to open and
+        ---reaching for it from here is what made a failed attach show nothing at all.
+        ---@return boolean shown
         select = function()
-            if not collections.isLoaded() then
-                if not collections.load() then
-                    logger.debug("Blizzard_Collections would not load; falling back")
-                    gallery.toggle()
-                    return
-                end
+            if not collections.isLoaded() and not collections.load() then
+                logger.debug("Blizzard_Collections would not load")
+                return false
             end
 
             if not attach() then
-                gallery.toggle()
-                return
+                return false
             end
 
             collections.openCollections()
             if tab and tab.Click then
                 tab:Click()
             end
+            return true
         end,
     }
 end

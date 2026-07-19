@@ -55,19 +55,22 @@ describe("ns.newSlashCommands", function()
         }, recorded
     end
 
-    ---A stub `WardrobeTab`.
+    ---A stub `WardrobeTab`. `select` answering false is the whole reason the standalone
+    ---fallback exists, so both answers have to be expressible.
+    ---@param shown boolean? what `select` reports; defaults to true
     ---@return WardrobeTab tab, table recorded `{ selects }`
-    local function newStubWardrobeTab()
+    local function newStubWardrobeTab(shown)
         local recorded = { selects = 0 }
         return {
             select = function()
                 recorded.selects = recorded.selects + 1
+                return shown ~= false
             end,
         }, recorded
     end
 
     ---@param db table? the SavedVariables root, so a test can assert what persisted
-    ---@param deps table? `{ controller, wardrobeTab }`, both optional on the module too
+    ---@param deps table? `{ controller, wardrobeTab, diagnose }`, all optional on the module
     ---@return SlashCommands commands
     ---@return table gallery recorded
     ---@return table logger recorded
@@ -82,6 +85,7 @@ describe("ns.newSlashCommands", function()
             gallery = gallery,
             controller = deps.controller,
             wardrobeTab = deps.wardrobeTab,
+            diagnose = deps.diagnose,
             logger = logger,
             db = db,
         })
@@ -244,6 +248,29 @@ describe("ns.newSlashCommands", function()
 
                 assert.equal(1, gallery.toggles)
             end)
+
+            -- The bug this pins down: a tab that could not show the gallery used to be
+            -- trusted to have handled it, and `/ff` did nothing at all. The fallback is
+            -- unconditional on the tab saying no.
+            it("toggles the standalone window on " .. case.label .. " when the tab says no", function()
+                local tab, tabRecorded = newStubWardrobeTab(false)
+                local commands, gallery = newCommands(nil, { wardrobeTab = tab })
+
+                commands.handle(case.input)
+
+                assert.equal(1, tabRecorded.selects)
+                assert.equal(1, gallery.toggles)
+            end)
+
+            it("keeps falling back on every " .. case.label .. " while the tab says no", function()
+                local tab = newStubWardrobeTab(false)
+                local commands, gallery = newCommands(nil, { wardrobeTab = tab })
+
+                commands.handle(case.input)
+                commands.handle(case.input)
+
+                assert.equal(2, gallery.toggles)
+            end)
         end
 
         it("leaves the wardrobe tab alone on refresh", function()
@@ -253,6 +280,96 @@ describe("ns.newSlashCommands", function()
             commands.handle("refresh")
 
             assert.equal(0, tabRecorded.selects)
+        end)
+    end)
+
+    ---The parts of this addon that guess at Blizzard's internals cannot be verified by
+    ---this suite — there is no client to ask. `/ff diag` is how a player reports back what
+    ---their client actually exposes, so it has to survive every shape of that answer.
+    describe("diag", function()
+        it("logs every line the diagnosis reports", function()
+            local lines = { "C_Transmog.SetPending: yes", "WardrobeCollectionFrame: MISSING" }
+            local commands, _, logger = newCommands(nil, {
+                diagnose = function()
+                    return lines
+                end,
+            })
+
+            commands.handle("diag")
+
+            for _, line in ipairs(lines) do
+                assert.is_true(anyLineContains(logger.lines, line))
+            end
+        end)
+
+        it("logs them in the order the diagnosis gave them", function()
+            local commands, _, logger = newCommands(nil, {
+                diagnose = function()
+                    return { "first", "second", "third" }
+                end,
+            })
+
+            commands.handle("diag")
+
+            assert.same({ "first", "second", "third" }, logger.lines)
+        end)
+
+        it("re-reads the diagnosis on every call, rather than a cached answer", function()
+            local calls = 0
+            local commands = newCommands(nil, {
+                diagnose = function()
+                    calls = calls + 1
+                    return {}
+                end,
+            })
+
+            commands.handle("diag")
+            commands.handle("diag")
+
+            assert.equal(2, calls)
+        end)
+
+        it("says nothing when the client reports nothing", function()
+            local commands, _, logger = newCommands(nil, {
+                diagnose = function()
+                    return {}
+                end,
+            })
+
+            commands.handle("diag")
+
+            assert.same({}, logger.lines)
+        end)
+
+        -- `diagnose` is optional on the deps, and a player typing a documented command
+        -- deserves a sentence rather than an error in their chat box.
+        it("explains itself when no diagnosis was injected", function()
+            local commands, _, logger = newCommands()
+
+            commands.handle("diag")
+
+            assert.is_true(anyLineContains(logger.lines, "no diagnostics available"))
+        end)
+
+        it("does not error when no diagnosis was injected", function()
+            local commands = newCommands()
+
+            assert.has_no.errors(function()
+                commands.handle("diag")
+            end)
+        end)
+
+        it("leaves the gallery alone", function()
+            local commands, gallery = newCommands(nil, {
+                diagnose = function()
+                    return { "a line" }
+                end,
+            })
+
+            commands.handle("diag")
+
+            assert.equal(0, gallery.toggles)
+            assert.equal(0, gallery.refreshes)
         end)
     end)
 
@@ -270,7 +387,7 @@ describe("ns.newSlashCommands", function()
         it("advertises the verbs the MVP ships", function()
             local commands = newCommands()
 
-            assert.same({ "sets", "refresh", "debug", "help" }, commands.commands())
+            assert.same({ "sets", "refresh", "debug", "diag", "help" }, commands.commands())
         end)
 
         it("explains what each verb does, not just its name", function()

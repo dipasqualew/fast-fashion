@@ -292,7 +292,11 @@ function ns.newGalleryFrame(deps)
         local embedded = host ~= nil
 
         if embedded then
-            frame = ui.createFrame("Frame", "FastFashionGalleryFrame", host)
+            -- A distinct global name. Both galleries can exist at once, and a shared name
+            -- would leave `_G.FastFashionGalleryFrame` pointing at whichever was built
+            -- last — so Escape, which resolves the standalone frame's name out of
+            -- UISpecialFrames, would hide the embedded one and leave the window stuck open.
+            frame = ui.createFrame("Frame", "FastFashionGalleryEmbedded", host)
             frame:SetAllPoints(host)
             frame:Hide()
         else

@@ -170,6 +170,123 @@ describe("addon integration", function()
         end)
     end)
 
+    ---The regression, at the level it actually bit. A single gallery frame used to decide
+    ---whether it was embedded by looking around at build time, so once Blizzard_Collections
+    ---was loaded the *standalone* window built itself as a child of the hidden Wardrobe
+    ---panel and the player saw nothing. Embedding is now a fixed property of each frame:
+    ---the standalone one is constructed with no host at all and cannot acquire one later.
+    describe("the standalone window and the embedded one, with Collections loaded", function()
+        ---Booted with a working UI *and* a Collections that is already loaded — the exact
+        ---situation in which the old code mis-parented its standalone frame.
+        ---@return table app, table recorded
+        local function bootAttached()
+            return boot({
+                ui = true,
+                collections = { loaded = true },
+                transmog = { sets = { set(1, "Judgement") } },
+            })
+        end
+
+        ---Every frame created under the gallery's global name, in creation order.
+        ---@param recorded table
+        ---@return table[] created
+        ---Both gallery windows, in creation order. They carry different global names on
+        ---purpose — one name across two live frames would leave the client resolving it to
+        ---whichever was built last — so this matches either.
+        local function galleryFrames(recorded)
+            local found = {}
+            for _, entry in ipairs(recorded.ui.created) do
+                if entry.name == "FastFashionGalleryFrame" or entry.name == "FastFashionGalleryEmbedded" then
+                    found[#found + 1] = entry
+                end
+            end
+            return found
+        end
+
+        it("parents the standalone window to UIParent", function()
+            local app, recorded = bootAttached()
+
+            app.frame.show()
+
+            local frames = galleryFrames(recorded)
+            assert.equal(1, #frames)
+            assert.equal("UIParent", frames[1].parent.name)
+        end)
+
+        -- The failure itself: the standalone frame ending up inside the Wardrobe, where
+        -- SetAllPoints on a hidden panel renders it invisible.
+        it("never parents the standalone window to the wardrobe or its gallery host", function()
+            local app, recorded = bootAttached()
+
+            app.frame.show()
+
+            local parent = galleryFrames(recorded)[1].parent
+            assert.not_equal(recorded.collections.wardrobe, parent)
+            assert.not_equal(recorded.collections.host, parent)
+        end)
+
+        -- Absent, not merely unused: a frame that can ask for a host is a frame that can
+        -- be given one by whatever happens to be loaded when it first builds.
+        it("gives the standalone window no way to acquire a host", function()
+            local app = bootAttached()
+
+            assert.is_nil(app.frame.getParent)
+        end)
+
+        -- Selecting is what builds it: the frame is lazy, so attaching alone creates no
+        -- widgets at all.
+        it("parents the embedded gallery to the host Collections hands over", function()
+            local app, recorded = bootAttached()
+
+            app.wardrobeTab.select()
+
+            local frames = galleryFrames(recorded)
+            assert.equal(1, #frames)
+            assert.equal(recorded.collections.host, frames[1].parent)
+        end)
+
+        -- Two frames, two parents, one presenter: proof they are genuinely separate
+        -- objects rather than one frame being re-hosted.
+        it("builds the two galleries against two different parents", function()
+            local app, recorded = bootAttached()
+
+            app.frame.show()
+            app.wardrobeTab.select()
+
+            local frames = galleryFrames(recorded)
+            assert.equal(2, #frames)
+            assert.not_equal(frames[1].parent, frames[2].parent)
+            assert.equal("UIParent", frames[1].parent.name)
+            assert.equal(recorded.collections.host, frames[2].parent)
+        end)
+
+        -- `/ff` with a working tab shows the gallery in the panel, and leaves the
+        -- standalone window closed.
+        it("opens the tab rather than the standalone window when the tab works", function()
+            local app, recorded = bootAttached()
+
+            recorded.slash.registrations[1].handler("")
+
+            assert.equal(1, recorded.collections.opened)
+            assert.is_false(app.frame.isShown())
+        end)
+
+        -- And the other half of the same contract: a Collections whose UI we cannot use
+        -- must land the player in the standalone window, not in nothing at all.
+        it("opens the standalone window when the tab cannot be added", function()
+            local app, recorded = boot({
+                ui = true,
+                collections = { loaded = true, tab = false },
+                transmog = { sets = { set(1, "Judgement") } },
+            })
+
+            recorded.slash.registrations[1].handler("")
+
+            assert.is_true(app.frame.isShown())
+            assert.equal("UIParent", galleryFrames(recorded)[1].parent.name)
+        end)
+    end)
+
     describe("the injected transmog adapter", function()
         it("is what the provider actually reads its sets from", function()
             local app, recorded = boot({

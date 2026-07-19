@@ -12,6 +12,7 @@ local addonName, ns = ...
 ---@field collections CollectionsAPI? Absent under test; drives the Wardrobe tab.
 ---@field after fun(seconds: number, callback: fun())? C_Timer.After, for coalescing refreshes.
 ---@field registerEvents fun(events: string[], handler: fun(event: string))? Client event stream.
+---@field diagnose fun(): string[]? Reports which client globals this build actually has.
 
 ---Composition root. Wires the modules together.
 ---@param env WowEnv
@@ -66,23 +67,33 @@ function ns.main(env)
         preview = preview,
     })
 
+    -- The standalone window. Deliberately built with no host: whether it embeds is a fixed
+    -- property of the frame, not something it works out from whatever happens to be loaded
+    -- when it is first shown. Deciding that late produced a "fallback" window parented to
+    -- the hidden Wardrobe panel, which is to say an invisible one.
     local frame = ns.newGalleryFrame({
         presenter = presenter,
         ui = env.ui or {},
         logger = logger,
-        -- The Wardrobe panel is only a parent once Blizzard_Collections is loaded, so this
-        -- is asked at build time rather than now.
-        getParent = env.collections and function()
-            return env.collections.isLoaded() and env.collections.getGalleryHost() or nil
-        end or nil,
     })
 
     local wardrobeTab
     if env.collections then
         wardrobeTab = ns.newWardrobeTab({
             collections = env.collections,
-            gallery = frame,
             logger = logger,
+            -- A second, separate frame that lives inside the Wardrobe. It shares the
+            -- presenter, so a set selected in one is selected in the other.
+            newEmbeddedGallery = function(host)
+                return ns.newGalleryFrame({
+                    presenter = presenter,
+                    ui = env.ui or {},
+                    logger = logger,
+                    getParent = function()
+                        return host
+                    end,
+                })
+            end,
         })
     end
 
@@ -123,6 +134,7 @@ function ns.main(env)
         gallery = frame,
         wardrobeTab = wardrobeTab,
         controller = gallery,
+        diagnose = env.diagnose,
         logger = logger,
         db = db,
     })
@@ -185,8 +197,13 @@ if CreateFrame then
             preview = {
                 isAvailable = function()
                     -- Pending transmog is only accepted while the player is actually at a
-                    -- transmogrifier; anywhere else SetPending is rejected.
-                    return C_Transmog.IsAtTransmogNPC and C_Transmog.IsAtTransmogNPC() == true
+                    -- transmogrifier; anywhere else SetPending is rejected. The frame being
+                    -- open is the fallback tell, for a client that does not expose the
+                    -- query — without it a missing API reads as "never at a vendor".
+                    if type(C_Transmog.IsAtTransmogNPC) == "function" then
+                        return C_Transmog.IsAtTransmogNPC() == true
+                    end
+                    return TransmogFrame ~= nil and TransmogFrame:IsShown() == true
                 end,
                 clearPending = function()
                     C_Transmog.ClearAllPending()
@@ -252,21 +269,33 @@ if CreateFrame then
                         return nil
                     end
 
+                    -- Anchoring to the last of Blizzard's own tabs only works if one is
+                    -- actually there under the name we expect. Everything from here to the
+                    -- hook is guesswork about another addon's internals, so it runs inside
+                    -- a pcall: a wrong guess must cost us the tab, never the player's
+                    -- Appearances panel.
                     local index = (wardrobe.numTabs or 2) + 1
-                    local ok, tab = pcall(
-                        CreateFrame,
-                        "Button",
-                        "FastFashionWardrobeTab",
-                        wardrobe,
-                        "WardrobeCollectionFrameTabTemplate"
-                    )
+                    local anchor = _G["WardrobeCollectionFrameTab" .. (index - 1)]
+                    if not anchor then
+                        return nil
+                    end
+
+                    local ok, tab = pcall(function()
+                        local built = CreateFrame(
+                            "Button",
+                            "FastFashionWardrobeTab",
+                            wardrobe,
+                            "WardrobeCollectionFrameTabTemplate"
+                        )
+                        built:SetID(index)
+                        built:SetText(label)
+                        built:SetPoint("TOPLEFT", anchor, "TOPRIGHT", -15, 0)
+                        return built
+                    end)
                     if not ok or not tab then
                         return nil
                     end
 
-                    tab:SetID(index)
-                    tab:SetText(label)
-                    tab:SetPoint("TOPLEFT", _G["WardrobeCollectionFrameTab" .. (index - 1)], "TOPRIGHT", -15, 0)
                     tab:SetScript("OnClick", function(clicked)
                         -- Blizzard's own tabs stay visually selected until something else
                         -- is picked, so deselecting them is our job.
@@ -287,10 +316,14 @@ if CreateFrame then
                     end)
 
                     -- Picking one of Blizzard's tabs has to put the gallery away again.
-                    hooksecurefunc(wardrobe, "SetTab", function()
-                        PanelTemplates_DeselectTab(tab)
-                        onDeselect()
-                    end)
+                    -- A client that does not expose SetTab still gets a working tab; it
+                    -- just will not auto-close, which beats erroring out of the attach.
+                    if type(wardrobe.SetTab) == "function" then
+                        pcall(hooksecurefunc, wardrobe, "SetTab", function()
+                            PanelTemplates_DeselectTab(tab)
+                            onDeselect()
+                        end)
+                    end
 
                     wardrobe.numTabs = index
                     return tab
@@ -306,6 +339,31 @@ if CreateFrame then
             getPlayerClass = function()
                 -- The localised name is the one the player recognises; the token is not.
                 return (UnitClass("player"))
+            end,
+            ---Everything here is a global this addon guesses the existence of. The suite
+            ---cannot check any of them, so the addon reports them on request instead.
+            diagnose = function()
+                local lines = {}
+
+                local function report(label, value)
+                    lines[#lines + 1] = label .. ": " .. (value and "yes" or "MISSING")
+                end
+
+                report("C_Item.RequestLoadItemDataByID", C_Item and C_Item.RequestLoadItemDataByID)
+                report("C_Transmog.IsAtTransmogNPC", C_Transmog and C_Transmog.IsAtTransmogNPC)
+                report("C_Transmog.SetPending", C_Transmog and C_Transmog.SetPending)
+                report("C_Transmog.ClearAllPending", C_Transmog and C_Transmog.ClearAllPending)
+                report("TransmogUtil.GetTransmogLocation", TransmogUtil and TransmogUtil.GetTransmogLocation)
+                report("Blizzard_Collections loaded", C_AddOns.IsAddOnLoaded("Blizzard_Collections"))
+                report("WardrobeCollectionFrame", WardrobeCollectionFrame)
+                report("WardrobeCollectionFrameTab2", _G["WardrobeCollectionFrameTab2"])
+                report("WardrobeCollectionFrame.SetTab", WardrobeCollectionFrame and WardrobeCollectionFrame.SetTab)
+                report("wardrobe tab attached", ns.app and ns.app.wardrobeTab and ns.app.wardrobeTab.isAttached())
+
+                local sets = C_TransmogSets.GetAllSets()
+                lines[#lines + 1] = "sets reported by client: " .. (sets and #sets or "none yet")
+
+                return lines
             end,
             registerSlash = function(name, commands, handler)
                 for index, command in ipairs(commands) do
