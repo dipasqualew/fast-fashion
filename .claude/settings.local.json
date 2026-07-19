@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//Users/wdp/git/dipasqualew/wdp-wow/**)",
+      "Read(//Users/wdp/git/dipasqualew/**)"
+    ]
+  }
+}

@@ -1,0 +1,11 @@
+## Interface: 120005
+## Title: Fast Fashion
+## Notes: Collection-aware transmog set gallery. /ff sets
+## Author: wdp
+## Version: 0.1.0
+## SavedVariables: FastFashionDB
+
+src/Logger.lua
+src/OutfitTypes.lua
+src/BlizzardSetProvider.lua
+Main.lua

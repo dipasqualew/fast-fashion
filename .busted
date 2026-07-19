@@ -1,0 +1,6 @@
+return {
+    _all = {
+        ROOT = { "spec" },
+        lpath = "spec/?.lua;spec/helpers/?.lua",
+    },
+}

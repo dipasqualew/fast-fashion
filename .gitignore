@@ -1,0 +1,4 @@
+.luarocks/
+luacov.*
+*.swp
+.DS_Store
