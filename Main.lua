@@ -159,6 +159,111 @@ function ns.main(env)
     }
 end
 
+---Picks whichever call this client build actually uses to enumerate a set's pieces.
+---
+---`C_Transmog.GetAllSetAppearancesByID` is what SPEC.md was written against, but it is not
+---present on every build — and binding a missing global produced a provider that could
+---never resolve a single set, which the UI reported as every row loading forever. So the
+---adapter is chosen by what exists, and each shape is normalised to the one the provider
+---understands: a list of entries carrying a *sourceID* in `itemModifiedAppearanceID`.
+---The provider fills the inventory slot in from GetSourceInfo when an entry has none.
+---@return fun(setID: number): table[]?
+local function setAppearancesAdapter()
+    if type(C_Transmog) == "table" and type(C_Transmog.GetAllSetAppearancesByID) == "function" then
+        return C_Transmog.GetAllSetAppearancesByID
+    end
+
+    -- Returns `{ appearanceID, collected }`, where `appearanceID` is a sourceID despite
+    -- the name — the same trap SPEC.md records for `itemModifiedAppearanceID`.
+    if type(C_TransmogSets.GetSetPrimaryAppearances) == "function" then
+        return function(setID)
+            local primary = C_TransmogSets.GetSetPrimaryAppearances(setID)
+            if not primary then
+                return nil
+            end
+            local items = {}
+            for index, entry in ipairs(primary) do
+                items[index] = { itemModifiedAppearanceID = entry.appearanceID }
+            end
+            return items
+        end
+    end
+
+    -- Bare sourceIDs, no wrapper table.
+    if type(C_TransmogSets.GetAllSourceIDs) == "function" then
+        return function(setID)
+            local sourceIDs = C_TransmogSets.GetAllSourceIDs(setID)
+            if not sourceIDs then
+                return nil
+            end
+            local items = {}
+            for index, sourceID in ipairs(sourceIDs) do
+                items[index] = { itemModifiedAppearanceID = sourceID }
+            end
+            return items
+        end
+    end
+
+    -- Nothing usable. Returning a function that answers "not yet" keeps the provider's
+    -- contract intact; the gallery reports loading rather than throwing on every row.
+    return function()
+        return nil
+    end
+end
+
+---The transmog preview, or nothing when this client does not expose the calls it needs.
+---
+---Returning nil is the honest answer and a supported one: the presenter greys **Preview
+---Set** out with a reason rather than offering a button that cannot work. Binding the
+---names anyway would turn every click into a Lua error, which the client hides by default
+---— so the failure would be invisible rather than merely disappointing.
+---@return TransmogPreviewAPI?
+local function previewAdapter()
+    local setPending = type(C_Transmog) == "table" and C_Transmog.SetPending
+    local clearPending = type(C_Transmog) == "table" and C_Transmog.ClearAllPending
+    local getLocation = type(TransmogUtil) == "table" and TransmogUtil.GetTransmogLocation
+
+    if type(setPending) ~= "function" or type(clearPending) ~= "function" or type(getLocation) ~= "function" then
+        return nil
+    end
+
+    return {
+        isAvailable = function()
+            -- Pending transmog is only accepted while the player is actually at a
+            -- transmogrifier; anywhere else SetPending is rejected. The frame being open
+            -- is the fallback tell, for a client that does not expose the query — without
+            -- it a missing API reads as "never at a vendor".
+            if type(C_Transmog.IsAtTransmogNPC) == "function" then
+                return C_Transmog.IsAtTransmogNPC() == true
+            end
+            return TransmogFrame ~= nil and TransmogFrame:IsShown() == true
+        end,
+
+        clearPending = function()
+            pcall(clearPending)
+        end,
+
+        setPending = function(inventorySlot, sourceID)
+            local ok, location = pcall(
+                getLocation,
+                inventorySlot,
+                Enum.TransmogType.Appearance,
+                Enum.TransmogModification.Main
+            )
+            if not ok or not location then
+                return false
+            end
+            return (pcall(setPending, location, sourceID))
+        end,
+
+        open = function()
+            if TransmogFrame and not TransmogFrame:IsShown() then
+                TransmogFrame:Show()
+            end
+        end,
+    }
+end
+
 -- Only auto-start inside the game; under test the harness calls ns.main itself.
 if CreateFrame then
     -- SavedVariables only exist once the addon's variables have loaded.
@@ -176,7 +281,7 @@ if CreateFrame then
             print = print,
             transmog = {
                 getAllSets = C_TransmogSets.GetAllSets,
-                getSetAppearances = C_Transmog.GetAllSetAppearancesByID,
+                getSetAppearances = setAppearancesAdapter(),
                 getSourceInfo = C_TransmogCollection.GetSourceInfo,
                 getAppearanceSources = C_TransmogCollection.GetAppearanceSources,
                 requestItemData = C_Item and C_Item.RequestLoadItemDataByID or nil,
@@ -194,38 +299,7 @@ if CreateFrame then
                 end)
                 return listener
             end,
-            preview = {
-                isAvailable = function()
-                    -- Pending transmog is only accepted while the player is actually at a
-                    -- transmogrifier; anywhere else SetPending is rejected. The frame being
-                    -- open is the fallback tell, for a client that does not expose the
-                    -- query — without it a missing API reads as "never at a vendor".
-                    if type(C_Transmog.IsAtTransmogNPC) == "function" then
-                        return C_Transmog.IsAtTransmogNPC() == true
-                    end
-                    return TransmogFrame ~= nil and TransmogFrame:IsShown() == true
-                end,
-                clearPending = function()
-                    C_Transmog.ClearAllPending()
-                end,
-                setPending = function(inventorySlot, sourceID)
-                    local location = TransmogUtil.GetTransmogLocation(
-                        inventorySlot,
-                        Enum.TransmogType.Appearance,
-                        Enum.TransmogModification.Main
-                    )
-                    if not location then
-                        return false
-                    end
-                    local ok = pcall(C_Transmog.SetPending, location, sourceID)
-                    return ok
-                end,
-                open = function()
-                    if TransmogFrame and not TransmogFrame:IsShown() then
-                        TransmogFrame:Show()
-                    end
-                end,
-            },
+            preview = previewAdapter(),
             collections = {
                 isLoaded = function()
                     return C_AddOns.IsAddOnLoaded("Blizzard_Collections") == true
@@ -350,9 +424,6 @@ if CreateFrame then
                 end
 
                 report("C_Item.RequestLoadItemDataByID", C_Item and C_Item.RequestLoadItemDataByID)
-                report("C_Transmog.IsAtTransmogNPC", C_Transmog and C_Transmog.IsAtTransmogNPC)
-                report("C_Transmog.SetPending", C_Transmog and C_Transmog.SetPending)
-                report("C_Transmog.ClearAllPending", C_Transmog and C_Transmog.ClearAllPending)
                 report("TransmogUtil.GetTransmogLocation", TransmogUtil and TransmogUtil.GetTransmogLocation)
                 report("Blizzard_Collections loaded", C_AddOns.IsAddOnLoaded("Blizzard_Collections"))
                 report("WardrobeCollectionFrame", WardrobeCollectionFrame)
@@ -362,6 +433,69 @@ if CreateFrame then
 
                 local sets = C_TransmogSets.GetAllSets()
                 lines[#lines + 1] = "sets reported by client: " .. (sets and #sets or "none yet")
+
+                -- Listing the namespace beats testing names one at a time: every guess I
+                -- make about what this client calls a function is another round trip, and
+                -- the client already knows the answer.
+                local function listFunctions(label, namespace)
+                    if type(namespace) ~= "table" then
+                        lines[#lines + 1] = label .. ": MISSING"
+                        return
+                    end
+                    local names = {}
+                    for key, value in pairs(namespace) do
+                        if type(value) == "function" then
+                            names[#names + 1] = key
+                        end
+                    end
+                    table.sort(names)
+                    lines[#lines + 1] = label .. " (" .. #names .. "): " .. table.concat(names, ", ")
+                end
+
+                listFunctions("C_Transmog", C_Transmog)
+                listFunctions("C_TransmogSets", C_TransmogSets)
+
+                -- Which call actually yields a set's pieces, asked of a real set rather
+                -- than assumed. This is the one that decides whether the gallery can show
+                -- anything at all, so it is answered by calling, not by reading a name.
+                local sampleID = sets and sets[1] and sets[1].setID
+                if not sampleID then
+                    lines[#lines + 1] = "no sample set to probe"
+                    return lines
+                end
+
+                lines[#lines + 1] = "probing set " .. sampleID .. " (" .. (sets[1].name or "?") .. "):"
+
+                local function probe(label, fn, ...)
+                    if type(fn) ~= "function" then
+                        lines[#lines + 1] = "  " .. label .. ": MISSING"
+                        return
+                    end
+                    local ok, result = pcall(fn, ...)
+                    if not ok then
+                        lines[#lines + 1] = "  " .. label .. ": ERROR " .. tostring(result)
+                    elseif type(result) ~= "table" then
+                        lines[#lines + 1] = "  " .. label .. ": " .. tostring(result)
+                    else
+                        local first = result[1]
+                        local shape = ""
+                        if type(first) == "table" then
+                            local keys = {}
+                            for key in pairs(first) do
+                                keys[#keys + 1] = key
+                            end
+                            table.sort(keys)
+                            shape = " first={" .. table.concat(keys, ",") .. "}"
+                        elseif first ~= nil then
+                            shape = " first=" .. tostring(first)
+                        end
+                        lines[#lines + 1] = "  " .. label .. ": " .. #result .. " entries" .. shape
+                    end
+                end
+
+                probe("C_Transmog.GetAllSetAppearancesByID", C_Transmog.GetAllSetAppearancesByID, sampleID)
+                probe("C_TransmogSets.GetSetPrimaryAppearances", C_TransmogSets.GetSetPrimaryAppearances, sampleID)
+                probe("C_TransmogSets.GetAllSourceIDs", C_TransmogSets.GetAllSourceIDs, sampleID)
 
                 return lines
             end,
