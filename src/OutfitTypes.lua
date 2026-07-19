@@ -36,6 +36,10 @@ local _, ns = ...
 ---@field preferredItemID number?
 
 ---A character's relationship to an outfit, recomputed per character and never persisted.
+---
+---`unresolved` extends the model in SPEC.md because the counts mean nothing without it:
+---an outfit whose data is still streaming in would otherwise be indistinguishable from
+---one the character genuinely cannot wear.
 ---@class ResolvedOutfit
 ---@field outfit Outfit
 ---@field wearable boolean Every required slot has at least one source usable by this character.
@@ -43,13 +47,16 @@ local _, ns = ...
 ---@field missingCount number
 ---@field totalCount number
 ---@field slots ResolvedOutfitSlot[]
+---@field unresolved boolean Some piece has not arrived from the client; counts are provisional.
 
 ---@class ResolvedOutfitSlot
+---@field inventorySlot number?
 ---@field appearanceID number
 ---@field resolvedSourceID number?
 ---@field collected boolean
 ---@field usable boolean
 ---@field missing boolean
+---@field unresolved boolean
 
 ---Where outfits come from. The gallery talks only to this interface, so adding community
 ---outfits later is a matter of registering another provider.

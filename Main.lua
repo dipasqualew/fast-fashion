@@ -5,6 +5,9 @@ local addonName, ns = ...
 ---@field print fun(message: string)
 ---@field transmog TransmogAPI
 ---@field db table SavedVariables root.
+---@field ui UIAPI? Absent under test, and in game until the UI is available.
+---@field getPlayerClass fun(): string? Localised class name.
+---@field registerSlash fun(name: string, commands: string[], handler: fun(input: string))?
 
 ---Composition root. Wires the modules together.
 ---@param env WowEnv
@@ -22,15 +25,60 @@ function ns.main(env)
         logger = logger,
     })
 
-    -- The gallery will read every provider in this list; community outfits join it later
+    -- The gallery reads every provider in this list; community outfits join it later
     -- without anything downstream changing.
     ---@type OutfitProvider[]
     local providers = { blizzardSets }
+
+    local appearances = ns.newAppearanceResolver({
+        api = env.transmog,
+        logger = logger,
+    })
+
+    local collection = ns.newCollectionResolver({
+        appearances = appearances,
+        logger = logger,
+    })
+
+    local gallery = ns.newGalleryController({
+        providers = providers,
+        collection = collection,
+        logger = logger,
+    })
+
+    local presenter = ns.newGalleryPresenter({
+        gallery = gallery,
+        -- Defaulted rather than required, so a caller with no character context still gets
+        -- a working gallery; the wearability line just drops the class name.
+        getPlayerClass = env.getPlayerClass or function() return nil end,
+    })
+
+    local frame = ns.newGalleryFrame({
+        presenter = presenter,
+        ui = env.ui or {},
+        logger = logger,
+    })
+
+    local slash = ns.newSlashCommands({
+        gallery = frame,
+        logger = logger,
+        db = db,
+    })
+
+    if env.registerSlash then
+        env.registerSlash("FASTFASHION", { "/ff", "/fastfashion" }, slash.handle)
+    end
 
     return {
         logger = logger,
         providers = providers,
         blizzardSets = blizzardSets,
+        appearances = appearances,
+        collection = collection,
+        gallery = gallery,
+        presenter = presenter,
+        frame = frame,
+        slash = slash,
     }
 end
 
@@ -53,7 +101,25 @@ if CreateFrame then
                 getAllSets = C_TransmogSets.GetAllSets,
                 getSetAppearances = C_Transmog.GetAllSetAppearancesByID,
                 getSourceInfo = C_TransmogCollection.GetSourceInfo,
+                getAppearanceSources = C_TransmogCollection.GetAppearanceSources,
             },
+            ui = {
+                createFrame = CreateFrame,
+                parent = UIParent,
+                registerEscapeClose = function(globalName)
+                    UISpecialFrames[#UISpecialFrames + 1] = globalName
+                end,
+            },
+            getPlayerClass = function()
+                -- The localised name is the one the player recognises; the token is not.
+                return (UnitClass("player"))
+            end,
+            registerSlash = function(name, commands, handler)
+                for index, command in ipairs(commands) do
+                    _G["SLASH_" .. name .. index] = command
+                end
+                SlashCmdList[name] = handler
+            end,
             db = FastFashionDB,
         })
     end)

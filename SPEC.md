@@ -345,6 +345,20 @@ equipment changes; a custom 3D renderer.
 | Capability | Status |
 | --- | --- |
 | 1. Browse Blizzard-defined named sets | Implemented (`src/BlizzardSetProvider.lua`) |
-| 2. "Can I wear it?" filtering | Not started |
-| 3. Sort by missing pieces | Not started |
-| 4. Apply to transmog preview | Not started |
+| 2. "Can I wear it?" filtering | Implemented (`src/AppearanceResolver.lua`, `src/CollectionResolver.lua`, `src/GalleryController.lua`) |
+| 3. Sort by missing pieces | Implemented (`src/GalleryController.lua`) |
+| 4. Apply to transmog preview | Not started — the detail pane has no **Preview Set** action yet |
+
+The gallery opens with `/ff` (or `/ff sets`) from `src/SlashCommands.lua`. `GalleryView` is
+split in two: `src/GalleryPresenter.lua` turns controller state into a view model and holds
+every decision about what the player is told, while `src/GalleryFrame.lua` only maps those
+fields onto widgets. It is not yet integrated into the Collections/Wardrobe interface as
+"UI direction" describes — it is a standalone window.
+
+The list is windowed: the presenter owns the scroll offset and hands the frame only the
+rows that fit, so the widget pool is sized to the viewport rather than to the set list. A
+client reporting thousands of sets therefore builds a dozen row frames, not thousands.
+
+`ResolvedOutfit` and `ResolvedOutfitSlot` as built carry one field beyond the model above,
+`unresolved`. Counts are meaningless without it — a set whose data is still streaming in
+would otherwise be indistinguishable from one the character genuinely cannot wear.

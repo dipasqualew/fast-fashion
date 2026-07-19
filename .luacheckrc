@@ -11,7 +11,6 @@ read_globals = {
     "CreateFrame",
     "UnitClass",
     "UIParent",
-    "UISpecialFrames",
     "print",
     "C_Transmog",
     "C_TransmogSets",
@@ -21,6 +20,8 @@ read_globals = {
 globals = {
     "FastFashionDB", -- SavedVariables
     "SlashCmdList",
+    "UISpecialFrames", -- appended to, so Escape closes the gallery
+    "_G", -- SLASH_* names have to be set as globals by name
 }
 
 exclude_files = { ".luacheckrc" }

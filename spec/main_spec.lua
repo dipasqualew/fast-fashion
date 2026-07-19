@@ -26,6 +26,12 @@ describe("addon integration", function()
 
             assert.is_function(ns.newLogger)
             assert.is_function(ns.newBlizzardSetProvider)
+            assert.is_function(ns.newAppearanceResolver)
+            assert.is_function(ns.newCollectionResolver)
+            assert.is_function(ns.newGalleryController)
+            assert.is_function(ns.newGalleryPresenter)
+            assert.is_function(ns.newGalleryFrame)
+            assert.is_function(ns.newSlashCommands)
             assert.is_function(ns.outfitId)
             assert.is_function(ns.main)
         end)
@@ -76,6 +82,88 @@ describe("addon integration", function()
             local _, recorded = boot()
 
             assert.same({}, recorded.lines)
+        end)
+    end)
+
+    describe("the gallery the player actually sees", function()
+        ---A booted addon with a working fake UI and one fully resolvable set.
+        ---@param options table?
+        ---@return table app, table recorded
+        local function bootWithUi(options)
+            options = options or {}
+            return boot({
+                ui = true,
+                playerClass = options.playerClass,
+                db = options.db,
+                transmog = {
+                    sets = { set(1, "Judgement") },
+                    items = { [1] = { { itemID = 10, itemModifiedAppearanceID = 5, invSlot = 1 } } },
+                    sources = { [5] = { visualID = 77 } },
+                    appearanceSources = {
+                        [77] = { { sourceID = 5, isCollected = true, isValidSourceForPlayer = true } },
+                    },
+                },
+            })
+        end
+
+        it("builds no frames merely by booting", function()
+            local _, recorded = bootWithUi()
+
+            assert.same({}, recorded.ui.frames)
+        end)
+
+        -- The whole stack, end to end: a set the client reports, resolved through the real
+        -- resolvers, arriving as text on a real widget. Every seam in between is exercised.
+        it("draws a booted set as a gallery row", function()
+            local app, recorded = bootWithUi({ playerClass = "Rogue" })
+
+            app.frame.show()
+
+            local view = app.presenter.getView()
+            assert.equal(1, #view.rows)
+            assert.equal("Judgement", view.rows[1].name)
+            assert.equal("1 / 1 collected", view.rows[1].progress)
+            assert.equal("Wearable by Rogue", view.rows[1].status)
+            assert.is_truthy(recorded.ui.byName["FastFashionGalleryFrame"])
+        end)
+
+        it("names the character's class in the wearability line", function()
+            local app = bootWithUi({ playerClass = "Druid" })
+
+            assert.equal("Wearable by Druid", app.presenter.getView().rows[1].status)
+        end)
+
+        it("registers a slash command that opens the gallery", function()
+            local app, recorded = bootWithUi()
+            local registration = recorded.slash.registrations[1]
+
+            assert.is_not_nil(registration)
+            assert.same({ "/ff", "/fastfashion" }, registration.commands)
+
+            registration.handler("")
+
+            assert.is_true(app.frame.isShown())
+        end)
+
+        it("closes the gallery when the command is typed again", function()
+            local app, recorded = bootWithUi()
+            local handler = recorded.slash.registrations[1].handler
+
+            handler("")
+            handler("")
+
+            assert.is_false(app.frame.isShown())
+        end)
+
+        -- The addon has to survive booting where no frames can be made; a gallery nobody
+        -- can open is far better than an error during login.
+        it("boots without a UI at all", function()
+            local app = boot()
+
+            assert.has_no.errors(function()
+                app.frame.toggle()
+            end)
+            assert.is_false(app.frame.isShown())
         end)
     end)
 

@@ -6,6 +6,7 @@ local _, ns = ...
 ---@field getAllSets fun(): TransmogSetInfo[]? C_TransmogSets.GetAllSets.
 ---@field getSetAppearances fun(setID: number): TransmogSetItemInfo[]? C_Transmog.GetAllSetAppearancesByID.
 ---@field getSourceInfo fun(sourceID: number): AppearanceSourceInfo? C_TransmogCollection.GetSourceInfo.
+---@field getAppearanceSources fun(appearanceID: number): AppearanceSourceInfo[]? GetAppearanceSources.
 
 ---What GetAllSets hands back. Documented here because the field names are Blizzard's and
 ---the provider is the only module allowed to know them.
@@ -35,6 +36,8 @@ local _, ns = ...
 ---@field itemID number?
 ---@field inventorySlot number?
 ---@field isCollected boolean?
+---@field isValidSourceForPlayer boolean? Whether this character may transmog this source.
+---@field canDisplayOnPlayer boolean? Whether the client will at least draw it in a preview.
 
 ---@class BlizzardSetProvider : OutfitProvider
 ---@field getOutfits fun(): Outfit[]

@@ -8,4 +8,10 @@
 src/Logger.lua
 src/OutfitTypes.lua
 src/BlizzardSetProvider.lua
+src/AppearanceResolver.lua
+src/CollectionResolver.lua
+src/GalleryController.lua
+src/GalleryPresenter.lua
+src/GalleryFrame.lua
+src/SlashCommands.lua
 Main.lua
