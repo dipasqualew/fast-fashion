@@ -15,6 +15,19 @@ read_globals = {
     "C_Transmog",
     "C_TransmogSets",
     "C_TransmogCollection",
+    "C_Item", -- RequestLoadItemDataByID, to make the client stream set items in
+    "C_Timer", -- After, for coalescing the client's data-event storms
+    "C_AddOns", -- load-on-demand Blizzard_Collections
+    "Enum",
+    "TransmogUtil",
+    "TransmogFrame",
+    "WardrobeCollectionFrame",
+    "CollectionsJournal",
+    "CollectionsJournal_LoadUI",
+    "ShowUIPanel",
+    "PanelTemplates_SelectTab",
+    "PanelTemplates_DeselectTab",
+    "hooksecurefunc",
 }
 
 globals = {

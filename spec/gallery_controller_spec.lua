@@ -5,8 +5,12 @@ describe("ns.newGalleryController", function()
     local ns = loader.load()
 
     ---@param outfits Outfit[]
+    ---@param recorded table? counters the provider adds to, so a test can watch it
     ---@return OutfitProvider
-    local function newStubProvider(outfits)
+    local function newStubProvider(outfits, recorded)
+        recorded = recorded or {}
+        recorded.invalidations = recorded.invalidations or 0
+
         return {
             getOutfits = function()
                 return outfits
@@ -20,6 +24,10 @@ describe("ns.newGalleryController", function()
                 end
                 return nil
             end,
+
+            invalidatePending = function()
+                recorded.invalidations = recorded.invalidations + 1
+            end,
         }
     end
 
@@ -28,9 +36,9 @@ describe("ns.newGalleryController", function()
     ---keeps this spec about filtering and sorting rather than about counting slots.
     ---@param rows table<string, ResolvedOutfit>
     ---@return CollectionResolver collection
-    ---@return table recorded `{ resolved, refreshes }`
+    ---@return table recorded `{ resolved, refreshes, invalidations }`
     local function newStubCollection(rows)
-        local recorded = { resolved = {}, refreshes = 0 }
+        local recorded = { resolved = {}, refreshes = 0, invalidations = 0 }
 
         local collection = {
             resolve = function(outfit)
@@ -40,6 +48,10 @@ describe("ns.newGalleryController", function()
 
             refresh = function()
                 recorded.refreshes = recorded.refreshes + 1
+            end,
+
+            invalidatePending = function()
+                recorded.invalidations = recorded.invalidations + 1
             end,
         }
 
@@ -85,11 +97,14 @@ describe("ns.newGalleryController", function()
     ---Builds a controller over one provider per group, in the order given.
     ---@param groups RowSpec[][]
     ---@param options table? `{ logger }`
-    ---@return GalleryController controller, table recorded
+    ---@return GalleryController controller
+    ---@return table recorded the collection resolver's
+    ---@return table providerRecorded shared by every provider in the list
     local function newControllerOver(groups, options)
         options = options or {}
         local providers = {}
         local rows = {}
+        local providerRecorded = {}
 
         for index, group in ipairs(groups) do
             local outfits = {}
@@ -98,7 +113,7 @@ describe("ns.newGalleryController", function()
                 outfits[position] = outfit
                 rows[spec.id] = row
             end
-            providers[index] = newStubProvider(outfits)
+            providers[index] = newStubProvider(outfits, providerRecorded)
         end
 
         local collection, recorded = newStubCollection(rows)
@@ -108,17 +123,17 @@ describe("ns.newGalleryController", function()
             logger = options.logger,
         })
 
-        return controller, recorded
+        return controller, recorded, providerRecorded
     end
 
     ---@param specs RowSpec[]
     ---@param options table?
-    ---@return GalleryController controller, table recorded
+    ---@return GalleryController controller, table recorded, table providerRecorded
     local function newController(specs, options)
         return newControllerOver({ specs }, options)
     end
 
-    ---@param rows ResolvedOutfit[]
+    ---@param rows GalleryRow[]
     ---@return string[]
     local function idsOf(rows)
         local ids = {}
@@ -468,6 +483,156 @@ describe("ns.newGalleryController", function()
             controller.setFilter("collected")
 
             assert.equal(ns.GALLERY_FILTER_ALL, controller.getFilter())
+        end)
+    end)
+
+    ---This is the performance fix, and the one behaviour here that a player feels: opening
+    ---the gallery used to sweep the whole collection because every row was resolved before
+    ---it could be listed. On a client reporting thousands of sets that is thousands of
+    ---source lookups for a dozen visible rows, and it is why every row read "Loading…".
+    describe("resolving no more than the view actually needs", function()
+        it("resolves nothing to list the default view", function()
+            local controller, recorded = newController(MIXED)
+
+            controller.getRows()
+
+            assert.same({}, recorded.resolved)
+        end)
+
+        it("hands the default view its rows unresolved", function()
+            local controller = newController(MIXED)
+
+            for _, row in ipairs(controller.getRows()) do
+                assert.is_nil(row.resolved)
+            end
+        end)
+
+        it("still lists every set in the default view", function()
+            local controller = newController(MIXED)
+
+            assert.same({ "a", "b", "c", "d" }, idsOf(controller.getRows()))
+        end)
+
+        it("resolves nothing however many times the default view is redrawn", function()
+            local controller, recorded = newController(MIXED)
+
+            controller.getRows()
+            controller.getRows()
+            controller.getRows()
+
+            assert.same({}, recorded.resolved)
+        end)
+
+        ---A wearability filter has to know every set's wearability and a missing-count sort
+        ---has to know every set's count, so those views genuinely cannot be answered from
+        ---the set list alone.
+        ---@type { label: string, apply: fun(controller: GalleryController) }[]
+        local demanding = {
+            {
+                label = "a wearability filter",
+                apply = function(controller)
+                    controller.setFilter(ns.GALLERY_FILTER_WEARABLE)
+                end,
+            },
+            {
+                label = "a missing-count sort",
+                apply = function(controller)
+                    controller.setSort(ns.GALLERY_SORT_MISSING_ASC)
+                end,
+            },
+        }
+
+        for _, case in ipairs(demanding) do
+            it("reports that " .. case.label .. " needs full resolution", function()
+                local controller = newController(MIXED)
+
+                case.apply(controller)
+
+                assert.is_true(controller.needsFullResolution())
+            end)
+
+            it("resolves every row under " .. case.label, function()
+                local controller, recorded = newController(MIXED)
+
+                case.apply(controller)
+                controller.getRows()
+
+                assert.equal(4, #recorded.resolved)
+            end)
+
+            it("carries the resolution on the row under " .. case.label, function()
+                local controller = newController(MIXED)
+
+                case.apply(controller)
+
+                for _, row in ipairs(controller.getRows()) do
+                    assert.is_not_nil(row.resolved)
+                end
+            end)
+        end
+
+        it("reports that the default view needs no full resolution", function()
+            local controller = newController(MIXED)
+
+            assert.is_false(controller.needsFullResolution())
+        end)
+
+        -- What the presenter calls for the handful of rows actually on screen.
+        it("resolves a single outfit on demand", function()
+            local controller, recorded = newController(MIXED)
+            local row = controller.getRows()[1]
+
+            local resolved = controller.resolve(row.outfit)
+
+            assert.equal("a", resolved.outfit.id)
+            assert.same({ "a" }, recorded.resolved)
+        end)
+    end)
+
+    describe("invalidatePending", function()
+        -- The client has streamed more data in: retire the "not yet" answers so they are
+        -- asked once more, and leave the settled ones alone.
+        it("passes the word to the collection resolver", function()
+            local controller, recorded = newController(MIXED)
+
+            controller.invalidatePending()
+
+            assert.equal(1, recorded.invalidations)
+        end)
+
+        -- The provider holds its own pending sets, and a set that never rebuilds its slots
+        -- leaves every row below it unresolvable no matter how often the resolvers retry.
+        it("passes the word to every provider", function()
+            local controller, _, providerRecorded = newControllerOver({
+                { { id = "a" } },
+                { { id = "b" } },
+            })
+
+            controller.invalidatePending()
+
+            assert.equal(2, providerRecorded.invalidations)
+        end)
+
+        -- Community outfit providers arrive later and need not implement it.
+        it("tolerates a provider that has none", function()
+            local collection = newStubCollection({})
+            local controller = ns.newGalleryController({
+                providers = { { getOutfits = function() return {} end, getOutfit = function() return nil end } },
+                collection = collection,
+            })
+
+            assert.has_no.errors(function()
+                controller.invalidatePending()
+            end)
+        end)
+
+        it("leaves the filter and sort the player chose alone", function()
+            local controller = newController(MIXED)
+            controller.setFilter(ns.GALLERY_FILTER_WEARABLE)
+
+            controller.invalidatePending()
+
+            assert.equal(ns.GALLERY_FILTER_WEARABLE, controller.getFilter())
         end)
     end)
 

@@ -15,7 +15,8 @@ local _, ns = ...
 
 ---@class AppearanceResolver
 ---@field resolve fun(appearanceID: number, preferredSourceID: number?): AppearanceResolution
----@field refresh fun() Drops the cache; for when the client signals the collection changed.
+---@field refresh fun() Drops every cache; for when the client signals the collection changed.
+---@field invalidatePending fun() Drops only the "not yet" answers, so they are retried once.
 
 ---@class AppearanceResolverDeps
 ---@field api TransmogAPI
@@ -52,19 +53,31 @@ function ns.newAppearanceResolver(deps)
     local api = deps.api
     local logger = deps.logger or { info = noop, debug = noop }
 
-    ---@type table<number, AppearanceResolution>
+    ---@type table<number, AppearanceResolution> Final answers, good until the collection changes.
     local cache = {}
+    ---Provisional "the client has not answered yet" results.
+    ---
+    ---These are cached, which looks wrong until you count the calls: the gallery re-reads
+    ---every visible row on every redraw, and an uncached miss meant re-asking the client
+    ---for the same absent data on every scroll tick. They are held only until new data
+    ---actually arrives — `invalidatePending` is driven by the client's own streaming
+    ---events — so a pending answer is still retried, just once per delivery instead of
+    ---once per frame.
+    ---@type table<number, AppearanceResolution>
+    local pending = {}
 
     ---@param appearanceID number
     ---@return AppearanceResolution
     local function unresolvedFor(appearanceID)
-        return {
+        local result = {
             appearanceID = appearanceID,
             resolvedSourceID = nil,
             usable = false,
             collected = false,
             unresolved = true,
         }
+        pending[appearanceID] = result
+        return result
     end
 
     ---Ranked source choice, best first: a source the player owns and can wear, then one
@@ -104,7 +117,7 @@ function ns.newAppearanceResolver(deps)
     ---@param preferredSourceID number?
     ---@return AppearanceResolution
     local function resolve(appearanceID, preferredSourceID)
-        local cached = cache[appearanceID]
+        local cached = cache[appearanceID] or pending[appearanceID]
         if cached then
             return cached
         end
@@ -139,6 +152,14 @@ function ns.newAppearanceResolver(deps)
 
         refresh = function()
             cache = {}
+            pending = {}
+        end,
+
+        ---Final answers survive: nothing the client streams in can change a resolution it
+        ---has already fully answered, and re-deriving thousands of them on every batch of
+        ---GET_ITEM_INFO_RECEIVED is exactly the stall this cache exists to prevent.
+        invalidatePending = function()
+            pending = {}
         end,
     }
 end

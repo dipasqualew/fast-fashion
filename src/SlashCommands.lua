@@ -8,6 +8,8 @@ local _, ns = ...
 
 ---@class SlashCommandsDeps
 ---@field gallery GalleryFrame
+---@field controller GalleryController? Drops cached collection state on `/ff refresh`.
+---@field wardrobeTab WardrobeTab? Opens the gallery in its Collections tab when available.
 ---@field logger Logger
 ---@field db table SavedVariables root, for the persisted debug flag.
 
@@ -24,8 +26,20 @@ end
 ---@return SlashCommands
 function ns.newSlashCommands(deps)
     local gallery = deps.gallery
+    local controller = deps.controller
+    local wardrobeTab = deps.wardrobeTab
     local logger = deps.logger
     local db = deps.db
+
+    ---The gallery's home is the Wardrobe tab where one could be attached, and the
+    ---standalone window everywhere else.
+    local function openGallery()
+        if wardrobeTab then
+            wardrobeTab.select()
+            return
+        end
+        gallery.toggle()
+    end
 
     local handlers = {}
     ---Declaration order is help order, so the list a player sees matches the list here.
@@ -39,11 +53,14 @@ function ns.newSlashCommands(deps)
         order[#order + 1] = verb
     end
 
-    command("sets", "open the set gallery", function()
-        gallery.toggle()
-    end)
+    command("sets", "open the set gallery", openGallery)
 
     command("refresh", "re-read collection state from the client", function()
+        -- Dropping the cached resolutions is the actual refresh; redrawing without it just
+        -- re-renders the same answers the resolvers already had.
+        if controller then
+            controller.refresh()
+        end
         gallery.refresh()
         logger.info("refreshed")
     end)
@@ -71,7 +88,7 @@ function ns.newSlashCommands(deps)
             -- A bare `/ff` is the command a player types most, so it does the thing they
             -- most likely want rather than lecturing them with a help screen.
             if verb == "" then
-                gallery.toggle()
+                openGallery()
                 return
             end
 

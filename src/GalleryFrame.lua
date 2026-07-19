@@ -21,6 +21,11 @@ local _, ns = ...
 ---@field presenter GalleryPresenter
 ---@field ui UIAPI
 ---@field logger Logger?
+---@field getParent fun(): any? Host frame to live inside. Absent means a standalone window.
+
+---The gallery is the same widget tree either way; only its chrome differs. Embedded in the
+---Wardrobe it inherits the panel's frame, title and Escape handling, and supplying its own
+---would stack a second window's worth of borders inside the first.
 
 local WIDTH = 720
 local HEIGHT = 520
@@ -243,6 +248,13 @@ function ns.newGalleryFrame(deps)
             widget.state:SetTextColor(statusColor(slot))
         end
 
+        -- Disabled-with-a-reason rather than hidden: a button that disappears reads as a
+        -- broken addon, where a greyed one under "Visit a transmog vendor" reads as a
+        -- thing the player can go and do.
+        detail.preview:SetText(view.preview.label)
+        detail.preview:SetEnabled(view.preview.enabled)
+        detail.previewReason:SetText(view.preview.reason or "")
+
         detail:Show()
     end
 
@@ -276,19 +288,28 @@ function ns.newGalleryFrame(deps)
     end
 
     local function build()
-        frame = ui.createFrame("Frame", "FastFashionGalleryFrame", ui.parent, "BasicFrameTemplateWithInset")
-        frame:SetSize(WIDTH, HEIGHT)
-        frame:SetPoint("CENTER")
-        frame:SetMovable(true)
-        frame:EnableMouse(true)
-        frame:RegisterForDrag("LeftButton")
-        frame:SetScript("OnDragStart", frame.StartMoving)
-        frame:SetScript("OnDragStop", frame.StopMovingOrSizing)
-        frame:Hide()
+        local host = deps.getParent and deps.getParent() or nil
+        local embedded = host ~= nil
 
-        frame.title = frame:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
-        frame.title:SetPoint("TOP", frame, "TOP", 0, -5)
-        frame.title:SetText("Fast Fashion")
+        if embedded then
+            frame = ui.createFrame("Frame", "FastFashionGalleryFrame", host)
+            frame:SetAllPoints(host)
+            frame:Hide()
+        else
+            frame = ui.createFrame("Frame", "FastFashionGalleryFrame", ui.parent, "BasicFrameTemplateWithInset")
+            frame:SetSize(WIDTH, HEIGHT)
+            frame:SetPoint("CENTER")
+            frame:SetMovable(true)
+            frame:EnableMouse(true)
+            frame:RegisterForDrag("LeftButton")
+            frame:SetScript("OnDragStart", frame.StartMoving)
+            frame:SetScript("OnDragStop", frame.StopMovingOrSizing)
+            frame:Hide()
+
+            frame.title = frame:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
+            frame.title:SetPoint("TOP", frame, "TOP", 0, -5)
+            frame.title:SetText("Fast Fashion")
+        end
 
         local view = presenter.getView()
         filterButtons = buildControlRow(frame, view.filters, presenter.setFilter, frame, -34)
@@ -354,8 +375,32 @@ function ns.newGalleryFrame(deps)
         detail.status:SetPoint("TOPLEFT", detail.progress, "BOTTOMLEFT", 0, -2)
         detail.status:SetJustifyH("LEFT")
 
-        -- Escape closes the window, the way every other panel in the game behaves.
-        ui.registerEscapeClose("FastFashionGalleryFrame")
+        -- Anchored to the bottom of the pane rather than under the slot list, so it holds
+        -- one position regardless of how many slots the selected set has.
+        detail.preview = ui.createFrame("Button", nil, detail, "UIPanelButtonTemplate")
+        detail.preview:SetPoint("BOTTOMLEFT", detail, "BOTTOMLEFT", 8, 8)
+        detail.preview:SetPoint("BOTTOMRIGHT", detail, "BOTTOMRIGHT", -8, 8)
+        detail.preview:SetHeight(24)
+        detail.preview:SetText("Preview Set")
+        detail.preview:SetScript("OnClick", function()
+            local message = presenter.previewSelected()
+            if message then
+                logger.info(message)
+            end
+            refresh()
+        end)
+
+        detail.previewReason = detail:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
+        detail.previewReason:SetPoint("BOTTOMLEFT", detail.preview, "TOPLEFT", 0, 4)
+        detail.previewReason:SetPoint("BOTTOMRIGHT", detail.preview, "TOPRIGHT", 0, 4)
+        detail.previewReason:SetJustifyH("LEFT")
+
+        -- Escape closes the window, the way every other panel in the game behaves. The
+        -- embedded gallery skips this: the Collections frame already answers Escape, and
+        -- registering again would close only the inner frame and leave an empty panel.
+        if not embedded then
+            ui.registerEscapeClose("FastFashionGalleryFrame")
+        end
     end
 
     ---@return boolean built

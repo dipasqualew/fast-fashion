@@ -43,18 +43,45 @@ describe("ns.newSlashCommands", function()
         return logger, recorded
     end
 
+    ---A stub `GalleryController`. `/ff refresh` has to drop the cached resolutions, not
+    ---merely redraw them, so the count of those calls is its own contract.
+    ---@return GalleryController controller, table recorded `{ refreshes }`
+    local function newStubController()
+        local recorded = { refreshes = 0 }
+        return {
+            refresh = function()
+                recorded.refreshes = recorded.refreshes + 1
+            end,
+        }, recorded
+    end
+
+    ---A stub `WardrobeTab`.
+    ---@return WardrobeTab tab, table recorded `{ selects }`
+    local function newStubWardrobeTab()
+        local recorded = { selects = 0 }
+        return {
+            select = function()
+                recorded.selects = recorded.selects + 1
+            end,
+        }, recorded
+    end
+
     ---@param db table? the SavedVariables root, so a test can assert what persisted
+    ---@param deps table? `{ controller, wardrobeTab }`, both optional on the module too
     ---@return SlashCommands commands
     ---@return table gallery recorded
     ---@return table logger recorded
     ---@return table db
-    local function newCommands(db)
+    local function newCommands(db, deps)
         db = db or {}
+        deps = deps or {}
         local gallery, galleryRecorded = newStubGallery()
         local logger, loggerRecorded = newRecordingLogger()
 
         local commands = ns.newSlashCommands({
             gallery = gallery,
+            controller = deps.controller,
+            wardrobeTab = deps.wardrobeTab,
             logger = logger,
             db = db,
         })
@@ -141,6 +168,91 @@ describe("ns.newSlashCommands", function()
             commands.handle("refresh")
 
             assert.equal(0, gallery.toggles)
+        end)
+
+        -- Redrawing without dropping the cached resolutions re-renders the very answers
+        -- the resolvers already had, which makes `/ff refresh` look broken to a player who
+        -- just collected a piece.
+        it("drops the cached collection state on refresh", function()
+            local controller, controllerRecorded = newStubController()
+            local commands = newCommands(nil, { controller = controller })
+
+            commands.handle("refresh")
+
+            assert.equal(1, controllerRecorded.refreshes)
+        end)
+
+        it("drops the cache before redrawing, not after", function()
+            local order = {}
+            local gallery = {
+                toggle = function() end,
+                refresh = function()
+                    order[#order + 1] = "redraw"
+                end,
+            }
+            local commands = ns.newSlashCommands({
+                gallery = gallery,
+                controller = {
+                    refresh = function()
+                        order[#order + 1] = "drop"
+                    end,
+                },
+                logger = newRecordingLogger(),
+                db = {},
+            })
+
+            commands.handle("refresh")
+
+            assert.same({ "drop", "redraw" }, order)
+        end)
+
+        -- The controller is optional on the deps, so a caller that wired only a frame
+        -- still gets a working redraw rather than an error in the chat box.
+        it("still redraws when no controller was injected", function()
+            local commands, gallery = newCommands()
+
+            commands.handle("refresh")
+
+            assert.equal(1, gallery.refreshes)
+        end)
+    end)
+
+    ---The gallery's home is its Collections tab where one could be attached, and the
+    ---standalone window everywhere else. Both `/ff` and `/ff sets` are the same door.
+    describe("opening the gallery where it actually lives", function()
+        ---@type { label: string, input: string }[]
+        local doors = {
+            { label = "a bare /ff", input = "" },
+            { label = "/ff sets", input = "sets" },
+        }
+
+        for _, case in ipairs(doors) do
+            it("selects the wardrobe tab on " .. case.label .. " when one exists", function()
+                local tab, tabRecorded = newStubWardrobeTab()
+                local commands, gallery = newCommands(nil, { wardrobeTab = tab })
+
+                commands.handle(case.input)
+
+                assert.equal(1, tabRecorded.selects)
+                assert.equal(0, gallery.toggles)
+            end)
+
+            it("toggles the standalone window on " .. case.label .. " when no tab exists", function()
+                local commands, gallery = newCommands()
+
+                commands.handle(case.input)
+
+                assert.equal(1, gallery.toggles)
+            end)
+        end
+
+        it("leaves the wardrobe tab alone on refresh", function()
+            local tab, tabRecorded = newStubWardrobeTab()
+            local commands = newCommands(nil, { wardrobeTab = tab })
+
+            commands.handle("refresh")
+
+            assert.equal(0, tabRecorded.selects)
         end)
     end)
 

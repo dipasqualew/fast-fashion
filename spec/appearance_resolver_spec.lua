@@ -232,12 +232,35 @@ describe("ns.newAppearanceResolver", function()
                 assert.is_false(resolution.collected)
             end)
 
-            -- Caching "not yet" would freeze the lie in for the whole session: the set
-            -- would stay greyed out until a /reload.
-            it("asks again on the next read when the client " .. case.label, function()
+            -- The provisional answer is held, not re-derived: the gallery re-reads every
+            -- visible row on every redraw, and asking the client for the same absent data
+            -- once per frame is the stall this cache exists to prevent. It is retired by
+            -- the client's own streaming events, not by the next read.
+            it("does not ask the client again before invalidatePending when it " .. case.label, function()
                 local resolver, recorded = newResolver(case.sources)
 
                 resolver.resolve(VISUAL_ID)
+                resolver.resolve(VISUAL_ID)
+                resolver.resolve(VISUAL_ID)
+
+                assert.equal(1, #recorded.appearanceSources)
+            end)
+
+            it("serves the same provisional answer from the cache when it " .. case.label, function()
+                local resolver, _, config = newResolver(case.sources)
+                assert.is_true(resolver.resolve(VISUAL_ID).unresolved)
+
+                config.appearanceSources[VISUAL_ID] = { ownedUsable(1) }
+
+                -- Data arriving is not enough on its own; nothing has told the resolver so.
+                assert.is_true(resolver.resolve(VISUAL_ID).unresolved)
+            end)
+
+            it("asks again after invalidatePending when it " .. case.label, function()
+                local resolver, recorded = newResolver(case.sources)
+                resolver.resolve(VISUAL_ID)
+
+                resolver.invalidatePending()
                 resolver.resolve(VISUAL_ID)
 
                 assert.equal(2, #recorded.appearanceSources)
@@ -248,12 +271,36 @@ describe("ns.newAppearanceResolver", function()
                 assert.is_true(resolver.resolve(VISUAL_ID).unresolved)
 
                 config.appearanceSources[VISUAL_ID] = { ownedUsable(1) }
+                resolver.invalidatePending()
 
                 local resolution = resolver.resolve(VISUAL_ID)
                 assert.is_false(resolution.unresolved)
                 assert.is_true(resolution.collected)
             end)
+
+            it("resolves once the sources arrive after a full refresh when it " .. case.label, function()
+                local resolver, _, config = newResolver(case.sources)
+                assert.is_true(resolver.resolve(VISUAL_ID).unresolved)
+
+                config.appearanceSources[VISUAL_ID] = { ownedUsable(1) }
+                resolver.refresh()
+
+                assert.is_false(resolver.resolve(VISUAL_ID).unresolved)
+            end)
         end
+
+        -- Settled answers are the expensive ones and nothing the client streams in can
+        -- change one, so re-deriving them on every batch of GET_ITEM_INFO_RECEIVED is
+        -- exactly the cost `invalidatePending` exists to avoid paying.
+        it("keeps a settled answer across invalidatePending", function()
+            local resolver, recorded = newResolver({ ownedUsable(1) })
+            resolver.resolve(VISUAL_ID)
+
+            resolver.invalidatePending()
+            resolver.resolve(VISUAL_ID)
+
+            assert.equal(1, #recorded.appearanceSources)
+        end)
     end)
 
     describe("caching", function()

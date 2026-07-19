@@ -3,13 +3,28 @@ local _, ns = ...
 ---@alias GalleryFilter "all" | "wearable" | "unwearable"
 ---@alias GallerySort "none" | "missingAsc" | "missingDesc"
 
+---One entry of the gallery list.
+---
+---`resolved` is populated only when the current filter or sort could not be answered
+---without it. In the default view neither can be answered *wrongly* by leaving it out —
+---"all sets, in the client's own order" is a question about the set list alone — so the
+---row is handed over unresolved and whoever draws it resolves the handful that are
+---actually on screen. That is the difference between opening the gallery costing one
+---metadata call and costing a full collection sweep of every set the client knows.
+---@class GalleryRow
+---@field outfit Outfit
+---@field resolved ResolvedOutfit?
+
 ---@class GalleryController
 ---@field getFilter fun(): GalleryFilter
 ---@field setFilter fun(filter: GalleryFilter)
 ---@field getSort fun(): GallerySort
 ---@field setSort fun(sort: GallerySort)
----@field getRows fun(): ResolvedOutfit[]
+---@field getRows fun(): GalleryRow[]
+---@field resolve fun(outfit: Outfit): ResolvedOutfit Resolves one row, on demand and cached.
+---@field needsFullResolution fun(): boolean Whether the current view had to resolve everything.
 ---@field refresh fun()
+---@field invalidatePending fun()
 
 ---@class GalleryControllerDeps
 ---@field providers OutfitProvider[]
@@ -86,8 +101,8 @@ function ns.newGalleryController(deps)
 
     ---Ties are broken by name and then id so the list holds still between reads; without
     ---it, two sets missing the same count would swap places on every redraw.
-    ---@param left ResolvedOutfit
-    ---@param right ResolvedOutfit
+    ---@param left GalleryRow
+    ---@param right GalleryRow
     ---@return boolean
     local function byIdentity(left, right)
         if left.outfit.name ~= right.outfit.name then
@@ -96,7 +111,9 @@ function ns.newGalleryController(deps)
         return left.outfit.id < right.outfit.id
     end
 
-    ---@param rows ResolvedOutfit[]
+    ---Only ever called for a sort that forced full resolution, so every row here carries
+    ---its `resolved`.
+    ---@param rows GalleryRow[]
     local function applySort(rows)
         if sort == ns.GALLERY_SORT_NONE then
             return
@@ -105,35 +122,48 @@ function ns.newGalleryController(deps)
         local ascending = sort == ns.GALLERY_SORT_MISSING_ASC
 
         table.sort(rows, function(left, right)
-            local leftPending, rightPending = isPending(left), isPending(right)
+            local leftPending, rightPending = isPending(left.resolved), isPending(right.resolved)
             if leftPending ~= rightPending then
                 return rightPending
             end
             if leftPending then
                 return byIdentity(left, right)
             end
-            if left.missingCount ~= right.missingCount then
+            if left.resolved.missingCount ~= right.resolved.missingCount then
                 if ascending then
-                    return left.missingCount < right.missingCount
+                    return left.resolved.missingCount < right.resolved.missingCount
                 end
-                return left.missingCount > right.missingCount
+                return left.resolved.missingCount > right.resolved.missingCount
             end
             return byIdentity(left, right)
         end)
     end
 
-    ---Filtering and sorting are both answers about the whole list, so this resolves every
-    ---outfit. That cost is paid when the gallery is opened, never at login, and the
-    ---resolvers memoise, so it is paid once per session per set.
-    ---@return ResolvedOutfit[]
+    ---Whether the current view is a question about the whole list. A wearability filter
+    ---has to know every set's wearability, and a missing-count sort has to know every
+    ---set's count — but the default view asks neither, and paying for both regardless is
+    ---what made opening the gallery stall on a client reporting thousands of sets.
+    ---@return boolean
+    local function needsFullResolution()
+        return filter ~= ns.GALLERY_FILTER_ALL or sort ~= ns.GALLERY_SORT_NONE
+    end
+
+    ---@return GalleryRow[]
     local function getRows()
         local outfits = allOutfits()
         local rows = {}
 
+        if not needsFullResolution() then
+            for index, outfit in ipairs(outfits) do
+                rows[index] = { outfit = outfit }
+            end
+            return rows
+        end
+
         for _, outfit in ipairs(outfits) do
-            local row = collection.resolve(outfit)
-            if passesFilter(row) then
-                rows[#rows + 1] = row
+            local resolved = collection.resolve(outfit)
+            if passesFilter(resolved) then
+                rows[#rows + 1] = { outfit = outfit, resolved = resolved }
             end
         end
 
@@ -169,11 +199,29 @@ function ns.newGalleryController(deps)
         end,
 
         getRows = getRows,
+        needsFullResolution = needsFullResolution,
+
+        ---@param outfit Outfit
+        ---@return ResolvedOutfit
+        resolve = function(outfit)
+            return collection.resolve(outfit)
+        end,
 
         ---Everything the player sees is character-specific and derived, so a refresh drops
         ---the resolutions but leaves the providers' set metadata alone.
         refresh = function()
             collection.refresh()
+        end,
+
+        ---The client has streamed more data in: retire the "not yet" answers so they are
+        ---asked again, and leave the settled ones alone.
+        invalidatePending = function()
+            collection.invalidatePending()
+            for _, provider in ipairs(providers) do
+                if provider.invalidatePending then
+                    provider.invalidatePending()
+                end
+            end
         end,
     }
 end

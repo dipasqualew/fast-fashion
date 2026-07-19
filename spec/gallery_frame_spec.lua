@@ -79,9 +79,10 @@ describe("ns.newGalleryFrame", function()
     ---makes a redraw over a *shorter* list expressible.
     ---@param view GalleryView
     ---@return GalleryPresenter presenter
-    ---@return table recorded `{ selected, filters, sorts, viewportSizes, scrollTos, scrollBys }`
+    ---@param message string? what `previewSelected` answers, if anything
+    ---@return table recorded `{ selected, filters, sorts, viewportSizes, scrollTos, scrollBys, previews }`
     ---@return fun(view: GalleryView) setView
-    local function newStubPresenter(view)
+    local function newStubPresenter(view, message)
         local recorded = {
             selected = {},
             filters = {},
@@ -89,6 +90,7 @@ describe("ns.newGalleryFrame", function()
             viewportSizes = {},
             scrollTos = {},
             scrollBys = {},
+            previews = 0,
         }
         local current = view
 
@@ -124,6 +126,11 @@ describe("ns.newGalleryFrame", function()
             scrollBy = function(delta)
                 recorded.scrollBys[#recorded.scrollBys + 1] = delta
             end,
+
+            previewSelected = function()
+                recorded.previews = recorded.previews + 1
+                return message
+            end,
         }
 
         return presenter, recorded, function(next)
@@ -147,7 +154,7 @@ describe("ns.newGalleryFrame", function()
 
     ---Builds a frame over a fake UI.
     ---@param spec table? view spec, as `buildView` takes
-    ---@param options table? `{ ui, logger }`
+    ---@param options table? `{ ui, logger, getParent, previewMessage }`
     ---@return GalleryFrame frame
     ---@return table ui recorded `{ frames, byName, escapeClosed }`
     ---@return table presenter recorded
@@ -155,12 +162,13 @@ describe("ns.newGalleryFrame", function()
     local function newFrame(spec, options)
         options = options or {}
         local ui, uiRecorded = fake.newUi()
-        local presenter, presenterRecorded, setView = newStubPresenter(buildView(spec))
+        local presenter, presenterRecorded, setView = newStubPresenter(buildView(spec), options.previewMessage)
 
         local frame = ns.newGalleryFrame({
             presenter = presenter,
             ui = options.ui or ui,
             logger = options.logger,
+            getParent = options.getParent,
         })
 
         return frame, uiRecorded, presenterRecorded, setView
@@ -170,6 +178,20 @@ describe("ns.newGalleryFrame", function()
     ---@return table widget the top-level gallery window
     local function windowOf(recorded)
         return recorded.byName[FRAME_NAME]
+    end
+
+    ---The arguments a named frame was created with. A widget answers any unset field with
+    ---a no-op method, so "was this built with a template?" can only be asked of the call.
+    ---@param recorded table
+    ---@param name string
+    ---@return table?
+    local function creationOf(recorded, name)
+        for _, creation in ipairs(recorded.created) do
+            if creation.name == name then
+                return creation
+            end
+        end
+        return nil
     end
 
     ---@param parent table
@@ -286,7 +308,22 @@ describe("ns.newGalleryFrame", function()
             progress = spec.progress or "1 / 2 collected",
             status = spec.status or "Wearable by Rogue",
             slots = spec.slots or {},
+            preview = spec.preview or {
+                label = "Preview Set",
+                enabled = spec.previewEnabled ~= false,
+                reason = spec.previewReason,
+            },
         }
+    end
+
+    ---The detail pane's own Preview Set button: the one child of the pane built from the
+    ---button template.
+    ---@param recorded table
+    ---@return table?
+    local function previewButtonOf(recorded)
+        return childrenWhere(detailOf(recorded), function(child)
+            return child.template == "UIPanelButtonTemplate"
+        end)[1]
     end
 
     it("is exported by the addon files", function()
@@ -654,11 +691,13 @@ describe("ns.newGalleryFrame", function()
 
             frame.show()
 
+            -- Lines 1-4 are name, subtitle, progress and status; 5 is the preview reason,
+            -- built with the pane. The pooled slot lines follow.
             local lines = fontStrings(detailOf(recorded))
-            assert.equal("Head", lines[5].text)
-            assert.equal("Collected", lines[6].text)
-            assert.equal("Back", lines[7].text)
-            assert.equal("No usable source", lines[8].text)
+            assert.equal("Head", lines[6].text)
+            assert.equal("Collected", lines[7].text)
+            assert.equal("Back", lines[8].text)
+            assert.equal("No usable source", lines[9].text)
         end)
 
         -- Slot lines are pooled just like rows, so a set with fewer slots must not inherit
@@ -680,8 +719,8 @@ describe("ns.newGalleryFrame", function()
             frame.refresh()
 
             local lines = fontStrings(detailOf(recorded))
-            assert.equal("", lines[7].text)
             assert.equal("", lines[8].text)
+            assert.equal("", lines[9].text)
         end)
 
         it("hides again when the selection is dropped", function()
@@ -692,6 +731,179 @@ describe("ns.newGalleryFrame", function()
             frame.refresh()
 
             assert.is_false(detailOf(recorded).shown)
+        end)
+    end)
+
+    describe("the Preview Set button", function()
+        it("takes its label from the view model", function()
+            local frame, recorded = newFrame({ detail = buildDetail() })
+
+            frame.show()
+
+            assert.equal("Preview Set", previewButtonOf(recorded).text)
+        end)
+
+        it("is enabled when the view model says the action can run", function()
+            local frame, recorded = newFrame({ detail = buildDetail({ previewEnabled = true }) })
+
+            frame.show()
+
+            assert.is_true(previewButtonOf(recorded).enabled)
+        end)
+
+        -- Greyed with the reason printed beside it, rather than gone: the frame holds no
+        -- opinion about why, it just draws what the presenter decided.
+        it("is disabled when the view model says it cannot", function()
+            local frame, recorded = newFrame({
+                detail = buildDetail({ previewEnabled = false, previewReason = "Visit a transmog vendor." }),
+            })
+
+            frame.show()
+
+            assert.is_false(previewButtonOf(recorded).enabled)
+        end)
+
+        it("prints the reason it is disabled", function()
+            local frame, recorded = newFrame({
+                detail = buildDetail({ previewEnabled = false, previewReason = "Visit a transmog vendor." }),
+            })
+
+            frame.show()
+
+            assert.equal("Visit a transmog vendor.", fontStrings(detailOf(recorded))[5].text)
+        end)
+
+        it("clears a stale reason once the action becomes available", function()
+            local frame, recorded, _, setView = newFrame({
+                detail = buildDetail({ previewEnabled = false, previewReason = "Visit a transmog vendor." }),
+            })
+            frame.show()
+
+            setView(buildView({ detail = buildDetail({ previewEnabled = true }) }))
+            frame.refresh()
+
+            assert.equal("", fontStrings(detailOf(recorded))[5].text)
+        end)
+
+        it("asks the presenter to preview the selection when pressed", function()
+            local frame, recorded, presenterRecorded = newFrame({ detail = buildDetail() })
+            frame.show()
+
+            previewButtonOf(recorded):Click()
+
+            assert.equal(1, presenterRecorded.previews)
+        end)
+
+        it("tells the player whatever the presenter had to say", function()
+            local lines, logger = newRecordingLogger()
+            local frame, recorded = newFrame({ detail = buildDetail() }, {
+                logger = logger,
+                previewMessage = "Previewed Judgement; 2 slot(s) had no source.",
+            })
+            frame.show()
+
+            previewButtonOf(recorded):Click()
+
+            assert.same({ "Previewed Judgement; 2 slot(s) had no source." }, lines)
+        end)
+
+        -- A clean preview speaks for itself on the character model.
+        it("stays quiet when the presenter had nothing to say", function()
+            local lines, logger = newRecordingLogger()
+            local frame, recorded = newFrame({ detail = buildDetail() }, { logger = logger })
+            frame.show()
+
+            previewButtonOf(recorded):Click()
+
+            assert.same({}, lines)
+        end)
+    end)
+
+    ---The gallery is the same widget tree in the Wardrobe panel as it is standalone; only
+    ---its chrome differs. Supplying our own window inside Blizzard's would stack a second
+    ---set of borders inside the first, and answering Escape twice would close the inner
+    ---frame and leave the player staring at an empty panel.
+    describe("living inside the Wardrobe panel", function()
+        ---@return table host
+        local function newHost()
+            return fake.newWidget("Frame", "WardrobeCollectionFrame")
+        end
+
+        ---@param host table?
+        ---@return GalleryFrame frame, table recorded
+        local function newEmbedded(host)
+            host = host or newHost()
+            return newFrame({ rows = { { id = "a" } } }, {
+                getParent = function()
+                    return host
+                end,
+            })
+        end
+
+        it("parents the gallery to the host frame", function()
+            local host = newHost()
+            local frame, recorded = newEmbedded(host)
+
+            frame.show()
+
+            assert.equal(host, windowOf(recorded).parent)
+        end)
+
+        it("takes no window template of its own", function()
+            local frame, recorded = newEmbedded()
+
+            frame.show()
+
+            assert.is_nil(creationOf(recorded, FRAME_NAME).template)
+        end)
+
+        -- The Collections frame already carries a title; a second one would sit on top.
+        it("draws no title of its own", function()
+            local frame, recorded = newEmbedded()
+
+            frame.show()
+
+            assert.same({}, fontStrings(windowOf(recorded)))
+        end)
+
+        it("leaves Escape to the panel that owns it", function()
+            local frame, recorded = newEmbedded()
+
+            frame.show()
+
+            assert.same({}, recorded.escapeClosed)
+        end)
+
+        it("still draws its rows", function()
+            local frame, recorded = newEmbedded()
+
+            frame.show()
+
+            assert.equal(1, #rowButtons(recorded))
+        end)
+
+        -- A host that is not there yet is the standalone case, not an error: the Wardrobe
+        -- panel only exists once Blizzard_Collections has loaded.
+        it("falls back to a standalone window when there is no host", function()
+            local frame, recorded = newFrame({ rows = { { id = "a" } } }, {
+                getParent = function()
+                    return nil
+                end,
+            })
+
+            frame.show()
+
+            assert.equal("BasicFrameTemplateWithInset", creationOf(recorded, FRAME_NAME).template)
+            assert.same({ "FastFashionGalleryFrame" }, recorded.escapeClosed)
+        end)
+
+        it("builds a standalone window when no host lookup was injected at all", function()
+            local frame, recorded = newFrame({ rows = { { id = "a" } } })
+
+            frame.show()
+
+            assert.equal("BasicFrameTemplateWithInset", creationOf(recorded, FRAME_NAME).template)
+            assert.same({ "FastFashionGalleryFrame" }, recorded.escapeClosed)
         end)
     end)
 

@@ -31,6 +31,9 @@ describe("addon integration", function()
             assert.is_function(ns.newGalleryController)
             assert.is_function(ns.newGalleryPresenter)
             assert.is_function(ns.newGalleryFrame)
+            assert.is_function(ns.newTransmogPreview)
+            assert.is_function(ns.newRefreshScheduler)
+            assert.is_function(ns.newWardrobeTab)
             assert.is_function(ns.newSlashCommands)
             assert.is_function(ns.outfitId)
             assert.is_function(ns.main)
@@ -198,6 +201,226 @@ describe("addon integration", function()
             assert.equal(77, app.blizzardSets.getOutfits()[1].slots[1].appearanceID)
             assert.same({ 1 }, recorded.transmog.setAppearances)
             assert.same({ 5 }, recorded.transmog.sourceInfo)
+        end)
+    end)
+
+    ---`preview`, `collections`, `after` and `registerEvents` are every one of them optional
+    ---on `WowEnv`. Between them they cover a client with no transmog UI, a session where
+    ---Blizzard_Collections never loads and a harness with no clock — and the addon has to
+    ---boot in all of them, because a login-time error costs the player the whole addon.
+    describe("booting without the optional client seams", function()
+        it("boots with none of them at all", function()
+            local app = boot()
+
+            assert.is_not_nil(app.frame)
+            assert.is_not_nil(app.gallery)
+        end)
+
+        ---@type { label: string, read: fun(app: table): any }[]
+        local absent = {
+            { label = "no transmog preview", read = function(app) return app.preview end },
+            { label = "no wardrobe tab", read = function(app) return app.wardrobeTab end },
+            { label = "no refresh scheduler", read = function(app) return app.scheduler end },
+        }
+
+        for _, case in ipairs(absent) do
+            it("wires " .. case.label .. " when the client offers none", function()
+                assert.is_nil(case.read(boot()))
+            end)
+        end
+
+        -- The presenter still has to answer for the action, with a sentence rather than a
+        -- missing button, when there is no preview module behind it.
+        it("still explains the preview action with no transmog UI", function()
+            local app = boot({ transmog = { sets = { set(1, "Judgement") } } })
+            app.presenter.select("blizzard:1")
+
+            local preview = app.presenter.getView().detail.preview
+
+            assert.is_false(preview.enabled)
+            assert.is_string(preview.reason)
+        end)
+
+        it("subscribes to no events when the client offers no event stream", function()
+            local _, recorded = boot()
+
+            assert.same({}, recorded.events.registered)
+        end)
+
+        it("builds the modules the client does offer", function()
+            local app = boot({ preview = true, collections = true, after = true, events = true })
+
+            assert.is_not_nil(app.preview)
+            assert.is_not_nil(app.wardrobeTab)
+            assert.is_not_nil(app.scheduler)
+        end)
+    end)
+
+    describe("the client's data events", function()
+        ---@param options table?
+        ---@return table app, table recorded
+        local function bootWithEvents(options)
+            options = options or {}
+            options.events = true
+            options.ui = true
+            options.transmog = options.transmog or { sets = { set(1, "Judgement") } }
+            return boot(options)
+        end
+
+        -- The item data the provider asked for, arriving. This is the event that turns a
+        -- gallery full of "Loading…" into a gallery full of sets.
+        ---@type string[]
+        local required = { "GET_ITEM_INFO_RECEIVED", "TRANSMOG_COLLECTION_UPDATED" }
+
+        for _, event in ipairs(required) do
+            it("subscribes to " .. event, function()
+                local _, recorded = bootWithEvents()
+
+                local found = false
+                for _, name in ipairs(recorded.events.registered) do
+                    found = found or name == event
+                end
+                assert.is_true(found)
+            end)
+        end
+
+        -- A set the client had not answered for is parked as pending, and a redraw on its
+        -- own must not re-ask — that caching is the performance fix. Only the event saying
+        -- new data arrived is allowed to retire it.
+        it("leaves the pending answers alone on a plain redraw", function()
+            local transmog = { sets = { set(1, "Judgement") }, items = {} }
+            local app, recorded = bootWithEvents({ transmog = transmog })
+            app.frame.show()
+            local before = #recorded.transmog.setAppearances
+
+            app.frame.refresh()
+
+            assert.equal(before, #recorded.transmog.setAppearances)
+        end)
+
+        it("retires the pending answers when data arrives", function()
+            local transmog = { sets = { set(1, "Judgement") }, items = {} }
+            local app, recorded = bootWithEvents({ transmog = transmog })
+            app.frame.show()
+            local before = #recorded.transmog.setAppearances
+
+            recorded.events.fire("GET_ITEM_INFO_RECEIVED")
+
+            assert.equal(before + 1, #recorded.transmog.setAppearances)
+        end)
+
+        -- The whole point of the event, end to end: a row that read "Loading…" turns into
+        -- a real set once the client delivers the item data the provider asked for.
+        it("resolves a set that finished streaming in", function()
+            local transmog = { sets = { set(1, "Judgement") }, items = {} }
+            local app, recorded = bootWithEvents({ transmog = transmog })
+            app.frame.show()
+            assert.equal("Loading…", app.presenter.getView().rows[1].progress)
+
+            transmog.items[1] = { { itemID = 10, itemModifiedAppearanceID = 5, invSlot = 1 } }
+            transmog.sources = { [5] = { visualID = 77 } }
+            transmog.appearanceSources = {
+                [77] = { { sourceID = 5, isCollected = true, isValidSourceForPlayer = true } },
+            }
+            recorded.events.fire("GET_ITEM_INFO_RECEIVED")
+
+            assert.equal("1 / 1 collected", app.presenter.getView().rows[1].progress)
+        end)
+
+        -- Asking for the item data is what makes the retry eventually succeed; without it
+        -- the client never sends anything and the gallery loads forever.
+        it("asks the client for the item data it is missing", function()
+            local transmog = { sets = { set(1, "Judgement") }, items = { [1] = {
+                { itemID = 10, itemModifiedAppearanceID = 5, invSlot = 1 },
+            } } }
+            local app, recorded = bootWithEvents({ transmog = transmog })
+
+            app.frame.show()
+
+            assert.same({ 10 }, recorded.transmog.requestedItems)
+        end)
+
+        it("redraws the gallery the player has open", function()
+            local app, recorded = bootWithEvents()
+            app.frame.show()
+
+            assert.has_no.errors(function()
+                recorded.events.fire("TRANSMOG_COLLECTION_UPDATED")
+            end)
+            assert.is_true(app.frame.isShown())
+        end)
+
+        -- A client event long before the player ever opens the window must be a quiet
+        -- no-op rather than an error in the middle of an event handler.
+        it("survives an event before the gallery has ever been opened", function()
+            local _, recorded = bootWithEvents()
+
+            assert.has_no.errors(function()
+                recorded.events.fire("PLAYER_ENTERING_WORLD")
+            end)
+        end)
+    end)
+
+    ---The events arrive in bursts of hundreds during a login or a first gallery open, and
+    ---refreshing on each one would rebuild the same view hundreds of times.
+    describe("coalescing the event storm", function()
+        ---@return table app, table recorded
+        local function bootWithClock()
+            return boot({
+                ui = true,
+                events = true,
+                after = true,
+                transmog = { sets = { set(1, "Judgement") }, items = {} },
+            })
+        end
+
+        it("does not refresh on the event itself", function()
+            local app, recorded = bootWithClock()
+            app.frame.show()
+            local before = #recorded.transmog.setAppearances
+
+            recorded.events.fire("GET_ITEM_INFO_RECEIVED")
+
+            assert.equal(before, #recorded.transmog.setAppearances)
+        end)
+
+        it("refreshes once for a whole burst of events", function()
+            local app, recorded = bootWithClock()
+            app.frame.show()
+            local before = #recorded.transmog.setAppearances
+
+            for _ = 1, 200 do
+                recorded.events.fire("GET_ITEM_INFO_RECEIVED")
+            end
+            recorded.timer.elapse()
+
+            assert.equal(before + 1, #recorded.transmog.setAppearances)
+        end)
+
+        it("arms a single timer for the whole burst", function()
+            local _, recorded = bootWithClock()
+
+            for _ = 1, 200 do
+                recorded.events.fire("GET_ITEM_INFO_RECEIVED")
+            end
+
+            assert.equal(1, #recorded.timer.queued)
+        end)
+
+        -- Without a clock there is nothing to coalesce with, so the refresh just runs
+        -- inline rather than being dropped.
+        it("refreshes inline when the client offers no timer", function()
+            local app, recorded = boot({
+                ui = true,
+                events = true,
+                transmog = { sets = { set(1, "Judgement") }, items = {} },
+            })
+            app.frame.show()
+            local before = #recorded.transmog.setAppearances
+
+            recorded.events.fire("GET_ITEM_INFO_RECEIVED")
+
+            assert.equal(before + 1, #recorded.transmog.setAppearances)
         end)
     end)
 

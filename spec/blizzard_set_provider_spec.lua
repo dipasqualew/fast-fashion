@@ -389,7 +389,8 @@ describe("ns.newBlizzardSetProvider", function()
         end)
 
         -- The retry is the point: an unresolved piece is not a missing piece, and caching
-        -- the empty answer would freeze that lie in for the whole session.
+        -- the empty answer permanently would freeze that lie in for the whole session. It
+        -- is held only until the client says it has delivered more data.
         it("returns the real slots once the appearances arrive", function()
             local provider, _, config = newProvider({
                 sets = { set() },
@@ -399,6 +400,7 @@ describe("ns.newBlizzardSetProvider", function()
             assert.same({}, provider.getOutfits()[1].slots)
 
             config.items[SET_ID] = { item(SOURCE_ID, { invSlot = 1 }) }
+            provider.invalidatePending()
 
             local slots = provider.getOutfits()[1].slots
             assert.equal(1, #slots)
@@ -414,18 +416,141 @@ describe("ns.newBlizzardSetProvider", function()
             assert.same({}, provider.getOutfits()[1].slots)
 
             config.sources[SOURCE_ID] = source(VISUAL_ID)
+            provider.invalidatePending()
 
             assert.equal(VISUAL_ID, provider.getOutfits()[1].slots[1].appearanceID)
         end)
 
-        it("asks the client again on every read until the data resolves", function()
+        -- Re-walking a set known to be waiting costs a GetSourceInfo call per piece and
+        -- reaches the same conclusion. Across a client reporting thousands of sets, once
+        -- per redraw, that is the whole performance problem.
+        it("does not ask the client again before invalidatePending", function()
             local provider, recorded = newProvider({ sets = { set() }, items = {} })
 
             local outfit = provider.getOutfits()[1]
             assert.same({}, outfit.slots)
             assert.same({}, outfit.slots)
+            assert.same({}, outfit.slots)
+
+            assert.equal(1, #recorded.setAppearances)
+        end)
+
+        it("asks the client again after invalidatePending", function()
+            local provider, recorded = newProvider({ sets = { set() }, items = {} })
+            assert.same({}, provider.getOutfits()[1].slots)
+
+            provider.invalidatePending()
+            assert.same({}, provider.getOutfits()[1].slots)
 
             assert.equal(2, #recorded.setAppearances)
+        end)
+
+        -- A set's slots are a property of the set, not of the character, so nothing that
+        -- streams in later changes one that already built.
+        it("keeps a built set across invalidatePending", function()
+            local provider, recorded = newProviderWithSlots(
+                { item(SOURCE_ID, { invSlot = 1 }) },
+                { [SOURCE_ID] = source(VISUAL_ID) }
+            )
+            assert.equal(1, #provider.getOutfits()[1].slots)
+
+            provider.invalidatePending()
+            assert.equal(1, #provider.getOutfits()[1].slots)
+
+            assert.equal(1, #recorded.setAppearances)
+        end)
+
+        -- An empty set list is the client not having loaded yet, not an account with no
+        -- sets, so the list itself is re-attempted too.
+        it("re-attempts an empty set list on invalidatePending", function()
+            local provider, recorded, config = newProvider({ sets = {} })
+            assert.same({}, provider.getOutfits())
+
+            config.sets = { set() }
+            provider.invalidatePending()
+
+            assert.equal(1, #provider.getOutfits())
+            assert.is_true(recorded.allSets > 1)
+        end)
+    end)
+
+    describe("asking the client for item data it has not sent", function()
+        local VISUAL_ID = 77
+
+        -- The client does not stream item data at an addon just because the addon wants
+        -- it. Without the request the set stays unresolved forever and every row of the
+        -- gallery reads "Loading…" for the whole session.
+        it("requests the item behind an unresolved source", function()
+            local provider, recorded = newProviderWithSlots({ item(1, { invSlot = 1 }) }, {})
+
+            assert.same({}, provider.getOutfits()[1].slots)
+
+            assert.same({ 10 }, recorded.requestedItems)
+        end)
+
+        -- One pass primes the whole set. Stopping at the first gap would need one redraw
+        -- per piece before a set could ever finish resolving.
+        it("requests every missing item of the set in one pass", function()
+            local provider, recorded = newProviderWithSlots({
+                item(1, { invSlot = 1 }),
+                item(2, { invSlot = 2 }),
+                item(3, { invSlot = 3 }),
+            }, {})
+
+            assert.same({}, provider.getOutfits()[1].slots)
+
+            assert.same({ 10, 20, 30 }, recorded.requestedItems)
+        end)
+
+        it("requests only the items that are actually missing", function()
+            local provider, recorded = newProviderWithSlots({
+                item(1, { invSlot = 1 }),
+                item(2, { invSlot = 2 }),
+            }, { [1] = source(VISUAL_ID) })
+
+            assert.same({}, provider.getOutfits()[1].slots)
+
+            assert.same({ 20 }, recorded.requestedItems)
+        end)
+
+        it("asks for nothing when the whole set resolved", function()
+            local provider, recorded = newProviderWithSlots(
+                { item(1, { invSlot = 1 }) },
+                { [1] = source(VISUAL_ID) }
+            )
+
+            assert.equal(1, #provider.getOutfits()[1].slots)
+
+            assert.same({}, recorded.requestedItems)
+        end)
+
+        -- The adapter is optional on `TransmogAPI`; a client build without
+        -- C_Item.RequestLoadItemDataByID must degrade to "retry later", not error.
+        it("survives a client that offers no way to request item data", function()
+            local api = fake.newTransmogApi({
+                sets = { set() },
+                items = { [SET_ID] = { item(1, { invSlot = 1 }) } },
+                sources = {},
+                requestItemData = false,
+            })
+            local provider = ns.newBlizzardSetProvider({ api = api })
+
+            assert.has_no.errors(function()
+                assert.same({}, provider.getOutfits()[1].slots)
+            end)
+        end)
+
+        -- Nothing can be requested for an entry the client gave no item id for, and
+        -- passing nil through would error inside the client's own function.
+        it("skips an unresolved entry with no item id", function()
+            local provider, recorded = newProviderWithSlots(
+                { { itemModifiedAppearanceID = 1, invSlot = 1 } },
+                {}
+            )
+
+            assert.same({}, provider.getOutfits()[1].slots)
+
+            assert.same({}, recorded.requestedItems)
         end)
     end)
 

@@ -347,17 +347,47 @@ equipment changes; a custom 3D renderer.
 | 1. Browse Blizzard-defined named sets | Implemented (`src/BlizzardSetProvider.lua`) |
 | 2. "Can I wear it?" filtering | Implemented (`src/AppearanceResolver.lua`, `src/CollectionResolver.lua`, `src/GalleryController.lua`) |
 | 3. Sort by missing pieces | Implemented (`src/GalleryController.lua`) |
-| 4. Apply to transmog preview | Not started — the detail pane has no **Preview Set** action yet |
+| 4. Apply to transmog preview | Implemented (`src/TransmogPreview.lua`) — **Preview Set** in the detail pane. The binding to the client's transmog globals in `Main.lua` is unverified in game |
 
 The gallery opens with `/ff` (or `/ff sets`) from `src/SlashCommands.lua`. `GalleryView` is
 split in two: `src/GalleryPresenter.lua` turns controller state into a view model and holds
 every decision about what the player is told, while `src/GalleryFrame.lua` only maps those
-fields onto widgets. It is not yet integrated into the Collections/Wardrobe interface as
-"UI direction" describes — it is a standalone window.
+fields onto widgets.
+
+`src/WardrobeTab.lua` adds the gallery to Collections → Appearances as a third tab, per
+"UI direction". Blizzard_Collections is load-on-demand, so attaching is deferred and every
+failure — the addon not loading, the wardrobe frame missing, the tab refusing to build —
+falls back to the standalone window rather than erroring. The same `GalleryFrame` serves
+both: `getParent` returning a host frame drops the window chrome and the Escape handler,
+which the Collections frame already provides.
 
 The list is windowed: the presenter owns the scroll offset and hands the frame only the
 rows that fit, so the widget pool is sized to the viewport rather than to the set list. A
 client reporting thousands of sets therefore builds a dozen row frames, not thousands.
+
+### Resolution cost
+
+Resolution is windowed too, and for the same reason. `GalleryController.getRows` returns
+`GalleryRow` — an outfit plus an *optional* resolution — and populates the resolution only
+when the current view cannot be answered without it. A wearability filter has to know every
+set's wearability and a missing-count sort has to know every set's count, but the default
+view asks neither, so it resolves only the rows the presenter is about to draw.
+
+Provisional answers are cached, not discarded. Every resolver keeps "the client has not
+answered yet" in a separate `pending` table cleared by `invalidatePending()`, which
+`Main.lua` drives from the client's own data events. Without this, a redraw re-asked the
+client for the same absent data on every scroll tick; with it, a pending answer is retried
+once per delivery. Settled answers survive invalidation and are dropped only by `refresh()`.
+
+`BlizzardSetProvider` also *requests* the data it is waiting on, via
+`C_Item.RequestLoadItemDataByID`. The client does not stream item data at an addon merely
+because the addon read it, so without the request a set stays unresolved for the whole
+session and the gallery reads "Loading…" forever. Every gap in a set is requested in one
+pass, so a single attempt primes the set rather than one item of it.
+
+`Main.lua` listens for `GET_ITEM_INFO_RECEIVED`, `TRANSMOG_COLLECTION_UPDATED` and the
+source add/remove events. These arrive in bursts of hundreds, so `src/RefreshScheduler.lua`
+coalesces them into one refresh.
 
 `ResolvedOutfit` and `ResolvedOutfitSlot` as built carry one field beyond the model above,
 `unresolved`. Counts are meaningless without it — a set whose data is still streaming in

@@ -65,22 +65,41 @@ describe("ns.newGalleryPresenter", function()
     ---A stub `GalleryController`. The presenter only ever reads the row list plus the two
     ---control states, so a stub keeps this spec about wording and selection rather than
     ---about filtering — which `gallery_controller_spec.lua` already owns.
+    ---
+    ---Rows come back the way the *default* view produces them: an outfit with no
+    ---resolution attached, resolved on demand through `resolve`. That is the shape the
+    ---presenter has to cope with, and `recorded.resolved` is how a test proves it resolves
+    ---only the window rather than the list. Pass `options.preResolved` for the other shape,
+    ---where a filter or sort already forced the controller to resolve everything.
     ---@param specs PresenterRowSpec[]
+    ---@param options table? `{ preResolved = boolean? }`
     ---@return GalleryController gallery
-    ---@return table recorded `{ filters, sorts }`
-    local function newStubGallery(specs)
-        local recorded = { filters = {}, sorts = {} }
+    ---@return table recorded `{ filters, sorts, resolved }`
+    local function newStubGallery(specs, options)
+        options = options or {}
+        local recorded = { filters = {}, sorts = {}, resolved = {} }
         local filter = ns.GALLERY_FILTER_ALL
         local sort = ns.GALLERY_SORT_NONE
 
+        local resolutions = {}
         local rows = {}
         for index, spec in ipairs(specs) do
-            rows[index] = buildRow(spec)
+            local resolved = buildRow(spec)
+            resolutions[resolved.outfit.id] = resolved
+            rows[index] = {
+                outfit = resolved.outfit,
+                resolved = options.preResolved and resolved or nil,
+            }
         end
 
         local gallery = {
             getRows = function()
                 return rows
+            end,
+
+            resolve = function(outfit)
+                recorded.resolved[#recorded.resolved + 1] = outfit.id
+                return resolutions[outfit.id]
             end,
 
             getFilter = function()
@@ -105,16 +124,41 @@ describe("ns.newGalleryPresenter", function()
         return gallery, recorded
     end
 
+    ---A stub `TransmogPreview`. What the presenter needs from it is one boolean and one
+    ---result record, so the whole module collapses to its config.
+    ---@param config table? `{ available = boolean?, result = PreviewResult? }`
+    ---@return TransmogPreview preview, table recorded `{ previewed }`
+    local function newStubPreview(config)
+        config = config or {}
+        local recorded = { previewed = {} }
+
+        local preview = {
+            canPreview = function()
+                return config.available ~= false
+            end,
+
+            preview = function(row)
+                recorded.previewed[#recorded.previewed + 1] = row.outfit.id
+                return config.result or { ok = true, applied = 1, skipped = 0 }
+            end,
+        }
+
+        return preview, recorded
+    end
+
     ---@param specs PresenterRowSpec[]
     ---@param playerClass string? what `getPlayerClass` answers; nil models an early login
+    ---@param options table? `{ preview = TransmogPreview?, preResolved = boolean? }`
     ---@return GalleryPresenter presenter, table recorded
-    local function newPresenter(specs, playerClass)
-        local gallery, recorded = newStubGallery(specs)
+    local function newPresenter(specs, playerClass, options)
+        options = options or {}
+        local gallery, recorded = newStubGallery(specs, options)
         local presenter = ns.newGalleryPresenter({
             gallery = gallery,
             getPlayerClass = function()
                 return playerClass
             end,
+            preview = options.preview,
         })
         return presenter, recorded
     end
@@ -702,6 +746,218 @@ describe("ns.newGalleryPresenter", function()
             presenter.scrollTo(7)
 
             assert.equal("row01", presenter.getView().detail.id)
+        end)
+    end)
+
+    ---The controller now hands the default view its rows unresolved, and the presenter is
+    ---the party that decides how many of them are worth resolving. Resolving the window
+    ---rather than the list is the whole point of the split, so it is pinned here as well
+    ---as in `gallery_controller_spec.lua`.
+    describe("resolving only what is on screen", function()
+        ---@param count number
+        ---@return PresenterRowSpec[]
+        local function manyRows(count)
+            local specs = {}
+            for index = 1, count do
+                specs[index] = { id = string.format("row%02d", index) }
+            end
+            return specs
+        end
+
+        it("resolves one row per visible line, not one per set", function()
+            local presenter, recorded = newPresenter(manyRows(200))
+            presenter.setViewportSize(3)
+
+            presenter.getView()
+
+            assert.same({ "row01", "row02", "row03" }, recorded.resolved)
+        end)
+
+        it("resolves the window it scrolled to, and nothing between", function()
+            local presenter, recorded = newPresenter(manyRows(200))
+            presenter.setViewportSize(2)
+            presenter.scrollTo(100)
+
+            presenter.getView()
+
+            assert.same({ "row101", "row102" }, recorded.resolved)
+        end)
+
+        -- Scanning the list for the selected set must not resolve everything it walks past.
+        it("resolves only the selected row on top of the window", function()
+            local presenter, recorded = newPresenter(manyRows(50))
+            presenter.setViewportSize(2)
+            presenter.select("row40")
+
+            presenter.getView()
+
+            assert.same({ "row40", "row01", "row02" }, recorded.resolved)
+        end)
+
+        -- A row the controller already had to resolve to answer the filter or sort is
+        -- reused as-is; asking again would pay for the same answer twice.
+        it("reuses a resolution the controller already made", function()
+            local presenter, recorded = newPresenter(manyRows(5), nil, { preResolved = true })
+
+            presenter.getView()
+
+            assert.same({}, recorded.resolved)
+        end)
+
+        it("still draws the rows it was handed pre-resolved", function()
+            local presenter = newPresenter({ { id = "a", name = "Judgement", collected = 1, total = 2 } },
+                nil, { preResolved = true })
+
+            assert.equal("1 / 2 collected", presenter.getView().rows[1].progress)
+        end)
+    end)
+
+    describe("the Preview Set action", function()
+        ---@type PresenterRowSpec
+        local READY = { id = "a", name = "Judgement", wearable = true, collected = 2, total = 2 }
+
+        ---@param specs PresenterRowSpec[]
+        ---@param preview TransmogPreview?
+        ---@return GalleryPreviewView
+        local function previewView(specs, preview)
+            local presenter = newPresenter(specs, nil, { preview = preview })
+            presenter.select(specs[1].id)
+            return presenter.getView().detail.preview
+        end
+
+        it("names the action", function()
+            assert.equal("Preview Set", previewView({ READY }, newStubPreview()).label)
+        end)
+
+        it("is enabled when the set is resolved and the transmog UI will take it", function()
+            assert.is_true(previewView({ READY }, newStubPreview()).enabled)
+        end)
+
+        it("carries no reason while it is enabled", function()
+            assert.is_nil(previewView({ READY }, newStubPreview()).reason)
+        end)
+
+        -- Disabled with a reason rather than hidden: a control that vanishes reads as a
+        -- broken addon, where a greyed one under an instruction reads as a thing to go do.
+        ---@type { label: string, preview: fun(): TransmogPreview?, specs: PresenterRowSpec[], reason: string }[]
+        local blocked = {
+            {
+                label = "the client offers no transmog UI at all",
+                preview = function() return nil end,
+                specs = { READY },
+                reason = "Visit a transmog vendor to preview this set.",
+            },
+            {
+                label = "the player is not at a transmogrifier",
+                preview = function() return (newStubPreview({ available = false })) end,
+                specs = { READY },
+                reason = "Visit a transmog vendor to preview this set.",
+            },
+            {
+                label = "the set is still loading",
+                preview = function() return (newStubPreview()) end,
+                specs = { { id = "a", unresolved = true } },
+                reason = "Still loading this set's appearances.",
+            },
+        }
+
+        for _, case in ipairs(blocked) do
+            it("is disabled when " .. case.label, function()
+                assert.is_false(previewView(case.specs, case.preview()).enabled)
+            end)
+
+            it("explains itself when " .. case.label, function()
+                assert.equal(case.reason, previewView(case.specs, case.preview()).reason)
+            end)
+        end
+    end)
+
+    describe("previewSelected", function()
+        ---@type PresenterRowSpec
+        local READY = { id = "a", name = "Judgement", wearable = true, collected = 2, total = 2 }
+
+        ---@param specs PresenterRowSpec[]
+        ---@param preview TransmogPreview?
+        ---@param selectedId string?
+        ---@return string? message
+        local function previewSelected(specs, preview, selectedId)
+            local presenter = newPresenter(specs, nil, { preview = preview })
+            presenter.select(selectedId)
+            return presenter.previewSelected()
+        end
+
+        it("hands the resolved outfit to the preview module", function()
+            local preview, recorded = newStubPreview()
+
+            previewSelected({ READY }, preview, "a")
+
+            assert.same({ "a" }, recorded.previewed)
+        end)
+
+        -- A clean preview speaks for itself on the character model; announcing it in chat
+        -- would be noise on every single click.
+        it("says nothing when the whole set went on", function()
+            local message = previewSelected({ READY }, newStubPreview({
+                result = { ok = true, applied = 5, skipped = 0 },
+            }), "a")
+
+            assert.is_nil(message)
+        end)
+
+        -- A partial preview is still a preview, but silently dropping pieces would look
+        -- like the addon getting the set wrong.
+        it("counts the slots it could not show", function()
+            local message = previewSelected({ READY }, newStubPreview({
+                result = { ok = true, applied = 3, skipped = 2 },
+            }), "a")
+
+            assert.is_truthy(message:find("2 slot(s)", 1, true))
+        end)
+
+        it("names the set it previewed", function()
+            local message = previewSelected({ READY }, newStubPreview({
+                result = { ok = true, applied = 3, skipped = 1 },
+            }), "a")
+
+            assert.is_truthy(message:find("Judgement", 1, true))
+        end)
+
+        ---@type { reason: string, message: string }[]
+        local refusals = {
+            { reason = "unavailable", message = "Visit a transmog vendor to preview this set." },
+            { reason = "loading", message = "Still loading this set's appearances." },
+            { reason = "noSources", message = "No part of this set can be shown on this character." },
+        }
+
+        for _, case in ipairs(refusals) do
+            it("passes on the '" .. case.reason .. "' refusal in the player's words", function()
+                local message = previewSelected({ READY }, newStubPreview({
+                    result = { ok = false, applied = 0, skipped = 0, reason = case.reason },
+                }), "a")
+
+                assert.equal(case.message, message)
+            end)
+        end
+
+        it("explains that there is no transmog UI when none was injected", function()
+            local message = previewSelected({ READY }, nil, "a")
+
+            assert.equal("Visit a transmog vendor to preview this set.", message)
+        end)
+
+        it("does nothing at all when no set is selected", function()
+            local preview, recorded = newStubPreview()
+
+            assert.is_nil(previewSelected({ READY }, preview, nil))
+            assert.same({}, recorded.previewed)
+        end)
+
+        -- A filter can hide the selected set between the click and the handler running.
+        it("does nothing when the selected set is no longer in the list", function()
+            local preview, recorded = newStubPreview()
+
+            assert.is_nil(previewSelected({ READY }, preview, "gone"))
+            assert.same({}, recorded.previewed)
         end)
     end)
 end)

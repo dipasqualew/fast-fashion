@@ -45,6 +45,15 @@ local _, ns = ...
 ---@field progress string
 ---@field status string
 ---@field slots GalleryDetailSlotView[]
+---@field preview GalleryPreviewView
+
+---The **Preview Set** action, as data. The button is always shown and sometimes disabled
+---with a reason, rather than disappearing: a control that vanishes reads as a broken
+---addon, where a greyed one with "Visit a transmog vendor" reads as an instruction.
+---@class GalleryPreviewView
+---@field label string
+---@field enabled boolean
+---@field reason string? Why it is disabled, for the tooltip.
 
 ---@class GalleryDetailSlotView
 ---@field label string Human name of the inventory slot.
@@ -55,6 +64,7 @@ local _, ns = ...
 
 ---@class GalleryPresenter
 ---@field getView fun(): GalleryView
+---@field previewSelected fun(): string? Applies the selection to the preview; returns a message.
 ---@field select fun(id: string?)
 ---@field getSelectedId fun(): string?
 ---@field setFilter fun(key: string)
@@ -66,6 +76,7 @@ local _, ns = ...
 ---@class GalleryPresenterDeps
 ---@field gallery GalleryController
 ---@field getPlayerClass fun(): string? Localised class name, for "Wearable by Rogue".
+---@field preview TransmogPreview? Absent where no transmog UI exists; the action then explains itself.
 
 ---Equipment slot numbers as the player knows them. A detail pane listing "slot 3" would be
 ---useless; anything unmapped falls back to the number rather than being dropped, because a
@@ -107,6 +118,16 @@ local EMPTY_MESSAGES = {
 
 local LOADING = "Loading…"
 
+local PREVIEW_LABEL = "Preview Set"
+
+---Said to the player when the action cannot run. Each names the thing to do about it,
+---because "cannot preview" alone leaves them with no next move.
+local PREVIEW_BLOCKED = {
+    unavailable = "Visit a transmog vendor to preview this set.",
+    loading = "Still loading this set's appearances.",
+    noSources = "No part of this set can be shown on this character.",
+}
+
 ---@param slot number
 ---@return string
 local function slotLabel(slot)
@@ -118,6 +139,7 @@ end
 function ns.newGalleryPresenter(deps)
     local gallery = deps.gallery
     local getPlayerClass = deps.getPlayerClass
+    local preview = deps.preview
 
     ---@type string?
     local selectedId
@@ -236,6 +258,25 @@ function ns.newGalleryPresenter(deps)
     end
 
     ---@param row ResolvedOutfit
+    ---@return GalleryPreviewView
+    local function toPreviewView(row)
+        local reason
+        if not preview then
+            reason = PREVIEW_BLOCKED.unavailable
+        elseif row.unresolved then
+            reason = PREVIEW_BLOCKED.loading
+        elseif not preview.canPreview() then
+            reason = PREVIEW_BLOCKED.unavailable
+        end
+
+        return {
+            label = PREVIEW_LABEL,
+            enabled = reason == nil,
+            reason = reason,
+        }
+    end
+
+    ---@param row ResolvedOutfit
     ---@return GalleryDetailView
     local function toDetailView(row)
         local slots = {}
@@ -256,37 +297,42 @@ function ns.newGalleryPresenter(deps)
             progress = progressOf(row),
             status = statusOf(row),
             slots = slots,
+            preview = toPreviewView(row),
         }
     end
 
     return {
         ---@return GalleryView
         getView = function()
-            local resolved = gallery.getRows()
+            local listRows = gallery.getRows()
             local filter = gallery.getFilter()
 
-            local total = #resolved
+            local total = #listRows
             local offset, visible, maxOffset = clampScroll(total)
 
-            -- The detail pane is resolved over the whole list, not the window: a set the
+            -- The detail pane is searched over the whole list, not the window: a set the
             -- player selected and then scrolled past is still the set they are reading.
+            -- Only that one row is resolved, not everything scanned on the way to it.
             local detail
             if selectedId then
-                for _, row in ipairs(resolved) do
+                for _, row in ipairs(listRows) do
                     if row.outfit.id == selectedId then
-                        detail = toDetailView(row)
+                        detail = toDetailView(row.resolved or gallery.resolve(row.outfit))
                         break
                     end
                 end
             end
 
+            -- Resolution happens here, for the dozen rows inside the viewport, rather than
+            -- across the whole set list. A row the controller already had to resolve to
+            -- answer the filter or sort is reused as-is.
             local rows = {}
             for index = 1, visible do
-                local row = resolved[offset + index]
+                local row = listRows[offset + index]
                 if not row then
                     break
                 end
-                rows[index] = toRowView(row)
+                rows[index] = toRowView(row.resolved or gallery.resolve(row.outfit))
             end
 
             return {
@@ -307,6 +353,45 @@ function ns.newGalleryPresenter(deps)
                 emptyMessage = total == 0 and EMPTY_MESSAGES[filter] or nil,
                 detail = detail,
             }
+        end,
+
+        ---Applies the selected set to the game's transmog preview.
+        ---
+        ---Returns the sentence to show the player, or nil when there is nothing to say —
+        ---a clean preview speaks for itself on the character model, and announcing it in
+        ---chat would be noise on every click.
+        ---@return string? message
+        previewSelected = function()
+            if not selectedId then
+                return nil
+            end
+            if not preview then
+                return PREVIEW_BLOCKED.unavailable
+            end
+
+            local target
+            for _, row in ipairs(gallery.getRows()) do
+                if row.outfit.id == selectedId then
+                    target = row.resolved or gallery.resolve(row.outfit)
+                    break
+                end
+            end
+
+            if not target then
+                return nil
+            end
+
+            local result = preview.preview(target)
+            if not result.ok then
+                return PREVIEW_BLOCKED[result.reason] or PREVIEW_BLOCKED.unavailable
+            end
+            -- A partial preview is still a preview, but silently dropping pieces would
+            -- look like the addon getting the set wrong.
+            if result.skipped > 0 then
+                return "Previewed " .. target.outfit.name .. "; " .. result.skipped ..
+                    " slot(s) had no source this character can show."
+            end
+            return nil
         end,
 
         ---@param rows number?

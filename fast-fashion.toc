@@ -12,6 +12,9 @@ src/AppearanceResolver.lua
 src/CollectionResolver.lua
 src/GalleryController.lua
 src/GalleryPresenter.lua
+src/TransmogPreview.lua
+src/RefreshScheduler.lua
 src/GalleryFrame.lua
+src/WardrobeTab.lua
 src/SlashCommands.lua
 Main.lua

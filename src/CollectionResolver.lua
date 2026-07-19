@@ -3,6 +3,7 @@ local _, ns = ...
 ---@class CollectionResolver
 ---@field resolve fun(outfit: Outfit): ResolvedOutfit
 ---@field refresh fun() Drops every cached resolution, appearance-level ones included.
+---@field invalidatePending fun() Drops only the provisional resolutions, so they retry once.
 
 ---@class CollectionResolverDeps
 ---@field appearances AppearanceResolver
@@ -18,6 +19,11 @@ function ns.newCollectionResolver(deps)
 
     ---@type table<string, ResolvedOutfit>
     local cache = {}
+    ---Provisional resolutions, held only until the client streams more data in. See the
+    ---note in AppearanceResolver: caching a "not yet" is what stops every redraw from
+    ---re-walking every slot of every still-loading set.
+    ---@type table<string, ResolvedOutfit>
+    local pending = {}
 
     ---An outfit whose slots the provider could not build yet. Reported as unresolved with
     ---no counts, never as an empty set the player has fully collected — a 0/0 row claiming
@@ -95,15 +101,17 @@ function ns.newCollectionResolver(deps)
         ---@param outfit Outfit
         ---@return ResolvedOutfit
         resolve = function(outfit)
-            local cached = cache[outfit.id]
+            local cached = cache[outfit.id] or pending[outfit.id]
             if cached then
                 return cached
             end
 
             local resolved = build(outfit)
-            -- Deliberately uncached while anything is still streaming in, so the next read
-            -- retries instead of freezing a provisional answer in for the session.
-            if not resolved.unresolved then
+            -- A provisional answer is held separately so it expires when the client
+            -- delivers more data, rather than being frozen in for the session.
+            if resolved.unresolved then
+                pending[outfit.id] = resolved
+            else
                 cache[outfit.id] = resolved
             end
 
@@ -112,7 +120,13 @@ function ns.newCollectionResolver(deps)
 
         refresh = function()
             cache = {}
+            pending = {}
             appearances.refresh()
+        end,
+
+        invalidatePending = function()
+            pending = {}
+            appearances.invalidatePending()
         end,
     }
 end

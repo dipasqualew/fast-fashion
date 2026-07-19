@@ -55,11 +55,11 @@ describe("ns.newCollectionResolver", function()
     ---about counting slots rather than about reading the client.
     ---@param answers table<number, AppearanceResolution> mutable; a missing key is pending
     ---@return AppearanceResolver appearances
-    ---@return table recorded `{ resolved, refreshes }`
+    ---@return table recorded `{ resolved, refreshes, invalidations }`
     ---@return table answers the very table the stub keeps reading
     local function newStubAppearances(answers)
         answers = answers or {}
-        local recorded = { resolved = {}, refreshes = 0 }
+        local recorded = { resolved = {}, refreshes = 0, invalidations = 0 }
 
         local appearances = {
             resolve = function(appearanceID, preferredSourceID)
@@ -72,6 +72,10 @@ describe("ns.newCollectionResolver", function()
 
             refresh = function()
                 recorded.refreshes = recorded.refreshes + 1
+            end,
+
+            invalidatePending = function()
+                recorded.invalidations = recorded.invalidations + 1
             end,
         }
 
@@ -316,14 +320,50 @@ describe("ns.newCollectionResolver", function()
             assert.is_true(slots[2].unresolved)
         end)
 
-        it("asks again on the next read rather than caching a provisional answer", function()
+        -- A provisional answer is cached like any other, just in a bucket that expires.
+        -- Re-walking every slot of every still-loading set on every redraw is precisely
+        -- what made the gallery stall while reading "Loading…" on every row.
+        it("does not re-walk the slots before invalidatePending", function()
             local resolver, recorded = newResolver({ [1] = owned(1), [2] = pending(2) })
             local subject = outfit({ 1, 2 })
 
             resolver.resolve(subject)
             resolver.resolve(subject)
+            resolver.resolve(subject)
+
+            assert.equal(2, #recorded.resolved)
+        end)
+
+        it("re-walks the slots after invalidatePending", function()
+            local resolver, recorded = newResolver({ [1] = owned(1), [2] = pending(2) })
+            local subject = outfit({ 1, 2 })
+            resolver.resolve(subject)
+
+            resolver.invalidatePending()
+            resolver.resolve(subject)
 
             assert.equal(4, #recorded.resolved)
+        end)
+
+        -- The appearance layer holds its own provisional answers, so invalidating only
+        -- this one would re-walk the slots straight back into the same stale "not yet".
+        it("invalidates the appearance resolver underneath it", function()
+            local resolver, recorded = newResolver({ [1] = owned(1) })
+
+            resolver.invalidatePending()
+
+            assert.equal(1, recorded.invalidations)
+        end)
+
+        it("keeps a settled outfit across invalidatePending", function()
+            local resolver, recorded = newResolver({ [1] = owned(1) })
+            local subject = outfit({ 1 })
+            assert.is_false(resolver.resolve(subject).unresolved)
+
+            resolver.invalidatePending()
+            resolver.resolve(subject)
+
+            assert.equal(1, #recorded.resolved)
         end)
 
         it("resolves the outfit once the appearances arrive", function()
@@ -332,6 +372,7 @@ describe("ns.newCollectionResolver", function()
             assert.is_true(resolver.resolve(subject).unresolved)
 
             answers[2] = owned(2)
+            resolver.invalidatePending()
 
             local row = resolver.resolve(subject)
             assert.is_false(row.unresolved)
